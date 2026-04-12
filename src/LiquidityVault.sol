@@ -5,6 +5,7 @@ import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.so
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
@@ -12,18 +13,19 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
-import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
+import {LiquidityAmounts} from "v4-core-test/utils/LiquidityAmounts.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
-contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
+contract LiquidityVault is ERC4626, Ownable2Step, ReentrancyGuard {
     using Math for uint256;
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
 
     uint256 public constant MIN_DEPOSIT = 1e6;
-    int24 public constant TICK_LOWER = -230270;
-    int24 public constant TICK_UPPER = -69082;
+
+    int24 public tickLower = -230270;
+    int24 public tickUpper = -69082;
 
     IPoolManager public immutable poolManager;
     IPositionManager public immutable positionManager;
@@ -40,6 +42,7 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
     event LiquidityRemoved(uint256 amount0, uint256 amount1, uint256 liquidity);
     event YieldCollected(uint256 amount, uint256 timestamp);
     event PoolKeySet(bytes32 indexed poolId);
+    event Rebalanced(int24 newTickLower, int24 newTickUpper);
 
     constructor(
         IERC20 _asset,
@@ -77,8 +80,7 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
     function _deployLiquidity(uint256 amount) internal {
         if (!_poolKeySet || amount == 0) return;
 
-        uint160 sqrtPriceLower = TickMath.getSqrtPriceAtTick(TICK_LOWER);
-        uint160 sqrtPriceUpper = TickMath.getSqrtPriceAtTick(TICK_UPPER);
+        uint160 sqrtPriceUpper = TickMath.getSqrtPriceAtTick(tickUpper);
         (uint160 sqrtPriceX96, , , ) = poolManager.getSlot0(poolKey.toId());
 
         uint128 liquidity = LiquidityAmounts.getLiquidityForAmount0(
@@ -90,7 +92,7 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
         if (positionTokenId == 0) {
             bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
             bytes[] memory params = new bytes[](2);
-            params[0] = abi.encode(poolKey, TICK_LOWER, TICK_UPPER, liquidity, amount, amount, address(this), "");
+            params[0] = abi.encode(poolKey, tickLower, tickUpper, liquidity, amount, amount, address(this), "");
             params[1] = abi.encode(poolKey.currency0, poolKey.currency1);
 
             IERC20(asset()).approve(address(positionManager), amount);
@@ -117,8 +119,14 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
         uint128 liquidityToRemove = uint128(totalLiquidityDeployed.mulDiv(proportion, 1e18));
         if (liquidityToRemove == 0) return;
 
-        uint256 amount0Min = 0;
-        uint256 amount1Min = 0;
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolKey.toId());
+        uint160 sqrtPriceLower = TickMath.getSqrtPriceAtTick(tickLower);
+        uint160 sqrtPriceUpper = TickMath.getSqrtPriceAtTick(tickUpper);
+        (uint256 exp0, uint256 exp1) = LiquidityAmounts.getAmountsForLiquidity(
+            sqrtPriceX96, sqrtPriceLower, sqrtPriceUpper, liquidityToRemove
+        );
+        uint256 amount0Min = exp0 * 995 / 1000;
+        uint256 amount1Min = exp1 * 995 / 1000;
 
         bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR), uint8(Actions.SWEEP));
         bytes[] memory params = new bytes[](3);
@@ -160,6 +168,21 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
         poolKey = _poolKey;
         _poolKeySet = true;
         emit PoolKeySet(PoolId.unwrap(_poolKey.toId()));
+    }
+
+    function rebalance(int24 newTickLower, int24 newTickUpper) external onlyOwner nonReentrant {
+        require(_poolKeySet, "POOL_KEY_NOT_SET");
+        require(newTickLower < newTickUpper, "INVALID_TICKS");
+        _collectYield();
+        if (totalLiquidityDeployed > 0 && positionTokenId != 0) {
+            _removeLiquidity(1e18);
+        }
+        positionTokenId = 0;
+        tickLower = newTickLower;
+        tickUpper = newTickUpper;
+        uint256 idle = IERC20(asset()).balanceOf(address(this));
+        if (idle >= MIN_DEPOSIT) _deployLiquidity(idle);
+        emit Rebalanced(newTickLower, newTickUpper);
     }
 
     function rescueIdle(address token) external onlyOwner {
