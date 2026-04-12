@@ -363,4 +363,92 @@ contract LiquidityVaultTest is Test {
 
         assertEq(vault.owner(), newOwner); // handoff complete
     }
-}
+    // ── Additional coverage ──────────────────────────────────────────────────
+
+    /// ERC-4626 redeem() path: burn shares → receive assets (alternative to withdraw).
+    function test_4626_redeem_alternativePath() public {
+        vault.setPoolKey(poolKey);
+        usdc.mint(alice, 100e6);
+
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        uint256 shares = vault.deposit(100e6, alice);
+
+        uint256 assetsOut = vault.redeem(shares, alice, alice);
+        vm.stopPrank();
+
+        assertApproxEqAbs(assetsOut, 100e6, 1);
+        assertEq(vault.balanceOf(alice), 0);
+    }
+
+    /// rebalance() reverts when newTickLower >= newTickUpper.
+    function test_4626_rebalance_invalidTicks_reverts() public {
+        vault.setPoolKey(poolKey);
+        vm.expectRevert("INVALID_TICKS");
+        vault.rebalance(-100000, -100000); // equal → invalid
+
+        vm.expectRevert("INVALID_TICKS");
+        vault.rebalance(-69082, -230270);  // reversed → invalid
+    }
+
+    /// rebalance() reverts when the pool key has not been set yet.
+    function test_4626_rebalance_poolKeyNotSet_reverts() public {
+        // vault from setUp has no pool key yet
+        vm.expectRevert("POOL_KEY_NOT_SET");
+        vault.rebalance(-300000, -100000);
+    }
+
+    /// getVaultStats() reflects live TVL, share price, and yield after state changes.
+    function test_4626_getVaultStats_updatesAfterYield() public {
+        vault.setPoolKey(poolKey);
+        usdc.mint(alice, 100e6);
+
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vault.deposit(100e6, alice);
+        vm.stopPrank();
+
+        // Pre-yield baseline
+        (uint256 tvl0, uint256 sp0, uint256 dep0,,uint256 yield0,) = vault.getVaultStats();
+        assertEq(tvl0, 100e6);
+        assertEq(dep0, 1);
+        assertEq(yield0, 0);
+        assertGe(sp0, 1e18); // share price ≥ 1 USDC (18-dec representation)
+
+        // Inject yield
+        uint256 yieldAmt = 20e6;
+        usdc.mint(address(mockPosMgr), yieldAmt);
+        mockPosMgr.queueYield(address(vault), address(usdc), yieldAmt);
+        vault.collectYield();
+
+        (uint256 tvl1, uint256 sp1,,,uint256 yield1,) = vault.getVaultStats();
+        assertEq(tvl1, 120e6);
+        assertGt(sp1, sp0);     // share price appreciated
+        assertEq(yield1, yieldAmt);
+    }
+
+    /// collectYield() is a no-op (no revert) when no position has been opened yet.
+    function test_4626_collectYield_noopBeforeDeposit() public {
+        vault.setPoolKey(poolKey);
+        // positionTokenId == 0 → _collectYield returns immediately
+        vault.collectYield(); // must not revert
+        assertEq(vault.totalYieldCollected(), 0);
+    }
+
+    /// For any deposit size, withdrawing the full balance returns essentially the same amount.
+    function testFuzz_depositWithdraw_noLeakage(uint256 assets) public {
+        assets = bound(assets, 1e6, 1e12); // 1 USDC to 1M USDC
+        vault.setPoolKey(poolKey);
+        usdc.mint(alice, assets);
+
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vault.deposit(assets, alice);
+
+        uint256 maxOut = vault.maxWithdraw(alice);
+        vault.withdraw(maxOut, alice, alice);
+        vm.stopPrank();
+
+        // Alice should recover her full deposit within 1 wei of rounding
+        assertApproxEqAbs(usdc.balanceOf(alice), assets, 1);
+    }}

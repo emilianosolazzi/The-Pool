@@ -144,4 +144,62 @@ contract DynamicFeeHookTest is Test {
         assertEq(hook.totalFeesRouted(), feePerSwap * swaps);
         assertEq(mockDistributor.callCount(), swaps);
     }
+
+    // ── Setter & access-control tests ───────────────────────────────────────
+
+    /// Owner can lower the fee cap; getSwapFeeInfo respects the new value.
+    function test_setMaxFeePerSwap_updatesAndEnforces() public {
+        uint256 newMax = 0.005 ether; // tighter than default 0.02 ether
+        hook.setMaxFeePerSwap(newMax);
+        assertEq(hook.maxFeePerSwap(), newMax);
+
+        // A swap large enough to exceed even the old cap should now return newMax
+        (uint256 fee,,,,) = hook.getSwapFeeInfo(1e22);
+        assertEq(fee, newMax);
+    }
+
+    /// Non-owner cannot adjust the fee cap.
+    function test_setMaxFeePerSwap_onlyOwner() public {
+        vm.prank(makeAddr("rando"));
+        vm.expectRevert();
+        hook.setMaxFeePerSwap(1e18);
+    }
+
+    /// Owner can point the hook at a new distributor.
+    function test_setFeeDistributor_updatesAddress() public {
+        address newDist = makeAddr("newDist");
+        hook.setFeeDistributor(newDist);
+        assertEq(address(hook.feeDistributor()), newDist);
+    }
+
+    /// Non-owner cannot replace the distributor.
+    function test_setFeeDistributor_onlyOwner() public {
+        vm.prank(makeAddr("rando"));
+        vm.expectRevert();
+        hook.setFeeDistributor(makeAddr("newDist"));
+    }
+
+    /// Ownable2Step: transferOwnership alone does not change the active owner;
+    /// acceptOwnership() by the pending owner completes the handoff.
+    function test_hook_ownable2step_requiresAccept() public {
+        address newOwner = makeAddr("newOwner");
+        hook.transferOwnership(newOwner);
+
+        assertEq(hook.owner(),        address(this)); // unchanged
+        assertEq(hook.pendingOwner(), newOwner);      // queued
+
+        vm.prank(newOwner);
+        hook.acceptOwnership();
+        assertEq(hook.owner(), newOwner);
+    }
+
+    // ── Fuzz tests ───────────────────────────────────────────────────────────
+
+    /// Fee must never exceed maxFeePerSwap for any amountIn.
+    function testFuzz_feeCalculation_capAlwaysRespected(uint256 amountIn) public view {
+        // Avoid overflow in the multiply: 30 * amountIn must fit in uint256
+        amountIn = bound(amountIn, 0, type(uint256).max / 10_000);
+        (uint256 fee,,,,) = hook.getSwapFeeInfo(amountIn);
+        assertLe(fee, hook.maxFeePerSwap());
+    }
 }

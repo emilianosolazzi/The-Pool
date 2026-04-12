@@ -132,4 +132,56 @@ contract FeeDistributorTest is Test {
         assertEq(distributor.totalDistributed(), amount * rounds);
         assertEq(distributor.totalToTreasury(), ((amount * 20) / 100) * rounds);
     }
+
+    // ── Additional coverage ──────────────────────────────────────────────────
+
+    /// After setTreasury(), subsequent distributions send fees to the new address, not the old one.
+    function test_setTreasury_routesFeeToUpdatedAddress() public {
+        address newTreasury = makeAddr("newTreasury");
+        distributor.setTreasury(newTreasury);
+
+        Currency feeCur = poolKey.currency0;
+        address tokenAddr = Currency.unwrap(feeCur);
+        uint256 amount = 100e6;
+        MockERC20(tokenAddr).mint(address(distributor), amount);
+
+        vm.prank(hookAddr);
+        distributor.distribute(feeCur, amount);
+
+        uint256 expectedTreasury = (amount * 20) / 100;
+        assertEq(MockERC20(tokenAddr).balanceOf(newTreasury), expectedTreasury);
+        assertEq(MockERC20(tokenAddr).balanceOf(treasury), 0); // old treasury gets nothing
+    }
+
+    /// Ownable2Step: transferOwnership alone does not change the active owner.
+    function test_distributor_ownable2step_requiresAccept() public {
+        address newOwner = makeAddr("newOwner");
+        distributor.transferOwnership(newOwner);
+
+        assertEq(distributor.owner(),        address(this));
+        assertEq(distributor.pendingOwner(), newOwner);
+
+        vm.prank(newOwner);
+        distributor.acceptOwnership();
+        assertEq(distributor.owner(), newOwner);
+    }
+
+    /// For any amount, treasury + LP portion must always equal the input total.
+    function testFuzz_split_treasuryPlusLP_equalsTotal(uint256 amount) public {
+        amount = bound(amount, 1, type(uint64).max);
+
+        Currency feeCur = poolKey.currency0;
+        MockERC20(Currency.unwrap(feeCur)).mint(address(distributor), amount);
+
+        uint256 treasuryBefore = MockERC20(Currency.unwrap(feeCur)).balanceOf(treasury);
+        uint256 lpsBefore      = distributor.totalToLPs();
+
+        vm.prank(hookAddr);
+        distributor.distribute(feeCur, amount);
+
+        uint256 treasuryGot = MockERC20(Currency.unwrap(feeCur)).balanceOf(treasury) - treasuryBefore;
+        uint256 lpsGot      = distributor.totalToLPs() - lpsBefore;
+
+        assertEq(treasuryGot + lpsGot, amount);
+    }
 }
