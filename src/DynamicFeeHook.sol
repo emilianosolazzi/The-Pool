@@ -10,20 +10,26 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 interface IFeeDistributor {
     function distribute(Currency currency, uint256 amount) external;
 }
 
-contract DynamicFeeHook is BaseHook {
+contract DynamicFeeHook is BaseHook, Ownable2Step {
     using CurrencyLibrary for Currency;
     using PoolIdLibrary for PoolKey;
+    using StateLibrary for IPoolManager;
 
     uint24 public constant LP_FEE = 100;
     uint256 public constant HOOK_FEE_BPS = 30;
     uint256 public constant BPS_DENOMINATOR = 10_000;
-    uint256 public constant MAX_FEE_PER_SWAP = 0.02 ether;
+
+    uint256 private constant VOLATILITY_THRESHOLD_BPS = 100; // 1% inter-swap price move
+    uint256 private constant VOLATILITY_FEE_MULTIPLIER = 150; // 1.5x fee in volatile regime
 
     uint256 private constant PENDING_FEE_SLOT =
         0xd1e54fc46e96497529fdb4b5abbcd802754a86c33bab838d6ce7d6ec96497b88;
@@ -31,13 +37,16 @@ contract DynamicFeeHook is BaseHook {
         0x2977767698129b4908fb9b19423b38883970765ad9aba8979e231f45612fa01e;
 
     IFeeDistributor public feeDistributor;
+    uint256 public maxFeePerSwap = 0.02 ether;
+    uint160 private lastSqrtPriceX96;
     uint256 public totalSwaps;
     uint256 public totalFeesRouted;
 
     event FeeRouted(address indexed currency, uint256 amount, uint256 swapIndex);
     event DistributorUpdated(address indexed old, address indexed newDistributor);
+    event MaxFeeUpdated(uint256 oldMax, uint256 newMax);
 
-    constructor(IPoolManager _poolManager, address _distributor) BaseHook(_poolManager) {
+    constructor(IPoolManager _poolManager, address _distributor) BaseHook(_poolManager) Ownable(msg.sender) {
         feeDistributor = IFeeDistributor(_distributor);
     }
 
@@ -70,7 +79,17 @@ contract DynamicFeeHook is BaseHook {
         uint256 amountIn = params.amountSpecified < 0 ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
         uint256 fee = (amountIn * HOOK_FEE_BPS) / BPS_DENOMINATOR;
 
-        if (fee > MAX_FEE_PER_SWAP) fee = MAX_FEE_PER_SWAP;
+        if (lastSqrtPriceX96 != 0) {
+            (uint160 currentSqrtPrice,,,) = poolManager.getSlot0(key.toId());
+            uint256 delta = currentSqrtPrice > lastSqrtPriceX96
+                ? currentSqrtPrice - lastSqrtPriceX96
+                : lastSqrtPriceX96 - currentSqrtPrice;
+            if (delta * BPS_DENOMINATOR / lastSqrtPriceX96 >= VOLATILITY_THRESHOLD_BPS) {
+                fee = fee * VOLATILITY_FEE_MULTIPLIER / 100;
+            }
+        }
+
+        if (fee > maxFeePerSwap) fee = maxFeePerSwap;
 
         Currency feeCurrency = params.zeroForOne ? key.currency1 : key.currency0;
         uint256 currencyAsUint = uint256(uint160(Currency.unwrap(feeCurrency)));
@@ -84,7 +103,7 @@ contract DynamicFeeHook is BaseHook {
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
 
-    function afterSwap(address, PoolKey calldata, SwapParams calldata, BalanceDelta, bytes calldata)
+    function afterSwap(address, PoolKey calldata key, SwapParams calldata, BalanceDelta, bytes calldata)
         external
         override
         returns (bytes4, int128)
@@ -109,16 +128,19 @@ contract DynamicFeeHook is BaseHook {
         totalFeesRouted += fee;
         emit FeeRouted(Currency.unwrap(feeCurrency), fee, totalSwaps);
 
+        (uint160 sqrtAfter,,,) = poolManager.getSlot0(key.toId());
+        lastSqrtPriceX96 = sqrtAfter;
+
         return (BaseHook.afterSwap.selector, int128(uint128(fee)));
     }
 
     function getSwapFeeInfo(uint256 amountIn)
         external
-        pure
+        view
         returns (uint256 feeAmount, uint256 feeBps, uint256 treasuryBps, uint256 lpBonusBps, string memory description)
     {
         feeAmount = (amountIn * HOOK_FEE_BPS) / BPS_DENOMINATOR;
-        if (feeAmount > MAX_FEE_PER_SWAP) feeAmount = MAX_FEE_PER_SWAP;
+        if (feeAmount > maxFeePerSwap) feeAmount = maxFeePerSwap;
 
         feeBps = HOOK_FEE_BPS;
         treasuryBps = 10;
@@ -128,5 +150,15 @@ contract DynamicFeeHook is BaseHook {
 
     function getStats() external view returns (uint256, uint256, address) {
         return (totalSwaps, totalFeesRouted, address(feeDistributor));
+    }
+
+    function setMaxFeePerSwap(uint256 newMax) external onlyOwner {
+        emit MaxFeeUpdated(maxFeePerSwap, newMax);
+        maxFeePerSwap = newMax;
+    }
+
+    function setFeeDistributor(address newDistributor) external onlyOwner {
+        emit DistributorUpdated(address(feeDistributor), newDistributor);
+        feeDistributor = IFeeDistributor(newDistributor);
     }
 }
