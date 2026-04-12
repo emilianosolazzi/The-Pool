@@ -58,9 +58,14 @@ Extends `BaseHook` and `Ownable2Step`. Activates `beforeSwap` and `afterSwap` ca
 |---|---|---|
 | `maxFeePerSwap` | `uint256` | Owner-adjustable cap |
 | `lastSqrtPriceX96` | `uint160` | Inter-swap price tracker for volatility detection |
+| `lastSwapBlock` | `uint256` | Block of last price-reference update; prevents same-block sandwich resets |
 | `feeDistributor` | `IFeeDistributor` | Replaceable by owner |
 | `totalSwaps` | `uint256` | Monotonically increasing counter |
 | `totalFeesRouted` | `uint256` | Cumulative fees sent to distributor |
+
+**Anti-sandwich protection**
+
+`lastSqrtPriceX96` is updated in `afterSwap` only when `block.number > lastSwapBlock`. An attacker cannot reset the reference price with a cheap same-block swap to suppress the 1.5× volatility multiplier on a subsequent exploit swap within the same block.
 
 ### `FeeDistributor` (`src/FeeDistributor.sol`)
 
@@ -91,43 +96,69 @@ This feeds `feeGrowthGlobal` in the v4 `PoolManager`, which accrues to all in-ra
 
 ### `LiquidityVault` (`src/LiquidityVault.sol`)
 
-Extends `ERC4626`, `Ownable2Step`, and `ReentrancyGuard`. Implements the yield-bearing side of the protocol.
+Extends `ERC4626`, `Ownable2Step`, `ReentrancyGuard`, and `Pausable`. Implements the yield-bearing side of the protocol.
 
 **ERC-4626 accounting**
 
 ```
-totalAssets() = balanceOf(vault) + totalLiquidityDeployed
+totalAssets() = balanceOf(vault) + assetsDeployed
 ```
 
-`totalLiquidityDeployed` is the raw `uint128` liquidity units, stored as a `uint256`, representing the vault's active concentrated-liquidity position. When yield is collected, USDC balance of the vault increases → share price rises → existing shares appreciate.
+`assetsDeployed` is the token-denominated value of assets currently held in the active concentrated-liquidity position. When yield is collected, the vault's asset balance increases → share price rises → existing shares appreciate.
 
 **Deposit flow**
 
 ```
-deposit(assets, receiver)
-  └── super.deposit()          // mint shares at current share price
-  └── _deployLiquidity(assets) // open or increase a v4 position
+deposit(assets, receiver)          [whenNotPaused]
+  └── TVL cap check (if maxTVL > 0)
+  └── super.deposit()              // mint shares at current share price
+  └── _deployLiquidity(assets)     // open or increase a v4 position
 ```
 
 **Withdraw flow**
 
 ```
-withdraw(assets, receiver, owner)
-  └── _collectYield()          // harvest any accrued fees from the position
+withdraw(assets, receiver, owner)  [whenNotPaused]
+  └── _collectYield()              // harvest any accrued fees from the position
   └── _removeLiquidity(proportion) // remove the pro-rata slice of the position
-  └── super.withdraw()         // burn shares, transfer USDC
+  └── super.withdraw()             // burn shares, transfer asset token
+```
+
+**Redeem flow**
+
+```
+redeem(shares, receiver, owner)    [whenNotPaused]
+  └── _collectYield()              // harvest fees
+  └── _removeLiquidity(proportion) // proportional removal
+  └── super.redeem()               // burn shares, transfer asset token
 ```
 
 **Yield collection**
 
-`_collectYield()` calls `modifyLiquidities(DECREASE_LIQUIDITY 0)` — a zero-liquidity decrease that triggers the position manager to flush accrued fee tokens to the vault. The vault measures `balanceAfter − balanceBefore` to account for the yield precisely.
+`_collectYield()` calls `modifyLiquidities(DECREASE_LIQUIDITY 0)` — a zero-liquidity decrease that triggers the position manager to flush accrued fee tokens to the vault. The vault:
+
+1. Measures `balanceAfter − balanceBefore` of the asset token.
+2. Checks the other currency's balance delta (guarded by `.code.length > 0` to skip sentinels) and records it in `currency1YieldCollected`.
+3. Deducts the performance fee from the asset-token yield and transfers it to `treasury`.
+4. Credits the net yield to `totalYieldCollected`.
+
+**Performance fee**
+
+Owner sets `performanceFeeBps` (max 2 000 = 20%). On each yield collection the fee is deducted from newly harvested asset-token yield and sent to `treasury` before the remainder is credited to depositors. Default is 0 (no fee).
 
 **Concentrated liquidity position**
 
-| Parameter | Default | Type |
+**Key state**
+
+| Variable | Default | Notes |
 |---|---|---|
-| `tickLower` | −230 270 | `int24 public` (owner-adjustable via `rebalance`) |
-| `tickUpper` | −69 082 | `int24 public` (owner-adjustable via `rebalance`) |
+| `tickLower` | −230 270 | Owner-adjustable via `rebalance` |
+| `tickUpper` | −69 082 | Owner-adjustable via `rebalance` |
+| `treasury` | deployer | Receives performance fees; updatable by owner |
+| `performanceFeeBps` | 0 | Fee on yield; max 2 000 (20%) |
+| `maxTVL` | 0 | Deposit ceiling in asset units; 0 = unlimited |
+| `currency1YieldCollected` | 0 | Cumulative non-asset-token yield collected |
+| `totalYieldCollected` | 0 | Cumulative net asset-token yield credited to depositors |
 
 Liquidity is computed from `LiquidityAmounts.getLiquidityForAmount0(sqrtPrice, sqrtPriceUpper, amount)`. Slippage on removal is protected via `getAmountsForLiquidity` with a 0.5 % haircut (`× 995 / 1000`).
 
@@ -183,11 +214,16 @@ Returns basis points. The caller supplies an externally observed `recentYield` w
 | Hook-only fee distribution | `require(msg.sender == hook)` in `FeeDistributor.distribute()` |
 | Two-step ownership | `Ownable2Step` on all three non-base contracts |
 | Reentrancy | `ReentrancyGuard` on `FeeDistributor` and `LiquidityVault` |
+| Emergency pause | `Pausable` on `LiquidityVault`; `pause()`/`unpause()` owner-only; blocks deposit, withdraw, redeem |
 | Callback caller verification | `onlyPoolManager` modifier in `BaseHook` |
 | Slippage on liquidity removal | 0.5 % minimum amount floor via `LiquidityAmounts.getAmountsForLiquidity` |
 | Transient fee storage | EIP-1153 `TSTORE/TLOAD` — fee data never persists across transactions |
 | Configurable fee cap | `maxFeePerSwap` prevents single-swap fee griefing |
 | Minimum deposit | `MIN_DEPOSIT = 1e6` (1 USDC) guards against dust-share inflation |
+| TVL cap | `maxTVL` (owner-set) — deposits revert with `TVL_CAP` when exceeded |
+| Rescue guard | `rescueIdle(token)` reverts if `token == asset()` — owner cannot drain the vault's own asset |
+| Anti-sandwich (volatility) | `lastSwapBlock` — reference price updates only once per block, blocking same-block multiplier suppression |
+| Other-token sentinel guard | `currency1YieldCollected` tracking skips zero-code addresses to prevent precompile calls |
 
 ---
 
@@ -195,9 +231,27 @@ Returns basis points. The caller supplies an externally observed `recentYield` w
 
 | Library | Source | Purpose |
 |---|---|---|
-| `v4-core` | Uniswap | `PoolManager`, `PoolKey`, `TickMath`, `StateLibrary`, `BalanceDelta` |
+| `v4-core` | Uniswap | `PoolManager`, `PoolKey`, `TickMath`, `StateLibrary`, `BalanceDelta`, `Currency` |
 | `v4-periphery` | Uniswap | `IPositionManager`, `Actions` |
 | `v4-core/test/utils` | Uniswap (test lib) | `LiquidityAmounts` (superset — includes `getAmountsForLiquidity`) |
+| OpenZeppelin v5 | OZ | `ERC4626`, `Ownable2Step`, `ReentrancyGuard`, `Pausable`, `Math` |
+
+---
+
+## Deployment
+
+`script/Deploy.s.sol` is a Foundry broadcast script that:
+
+1. Reads required env vars: `POOL_MANAGER`, `POS_MANAGER`, `TOKEN0`, `TOKEN1`, `TREASURY`.
+2. Reads optional env vars: `PERFORMANCE_FEE_BPS` (default 500), `MAX_TVL` (default 0), `MAX_FEE_BPS` (default 50), `POOL_FEE` (default 100), `TICK_SPACING` (default 1), `SQRT_PRICE_X96` (default 1:1).
+3. Deploys `FeeDistributor`, then `LiquidityVault`, then mines a CREATE2 salt for `DynamicFeeHook` so its address encodes the required hook permission bits.
+4. Wires the circular dependency (`vault.setHook`, `distributor.setHook`, etc.).
+5. Initialises the pool and registers the `PoolKey` on both the hook and vault.
+
+Run with:
+```bash
+forge script script/Deploy.s.sol --broadcast --rpc-url $RPC_URL
+```
 | OpenZeppelin v5.6.1 | OZ | `ERC4626`, `Ownable2Step`, `ReentrancyGuard`, `Math` |
 
 ---
