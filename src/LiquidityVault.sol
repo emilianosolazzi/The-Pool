@@ -193,12 +193,25 @@ contract LiquidityVault is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     /// @dev Grants the PositionManager permission to pull `amount` of asset tokens
     ///      via Permit2. Falls back to a direct ERC20 approve when Permit2 is not
     ///      available (test environments using a mock PositionManager).
+    ///      SETTLE_PAIR checks Permit2 for both currencies even when the debt for
+    ///      one is zero, so we must set a valid expiration for the non-asset currency
+    ///      to prevent AllowanceExpired(0) reverts.
     function _approveForPositionManager(uint256 amount) internal {
         if (permit2 != address(0)) {
             IAllowanceTransfer(permit2).approve(
                 asset(),
                 address(positionManager),
                 uint160(amount),
+                uint48(block.timestamp + 60)
+            );
+            // Non-asset currency: 0-amount allowance but valid expiry so Permit2 doesn't revert.
+            address otherCurrency = assetIsToken0
+                ? Currency.unwrap(poolKey.currency1)
+                : Currency.unwrap(poolKey.currency0);
+            IAllowanceTransfer(permit2).approve(
+                otherCurrency,
+                address(positionManager),
+                0,
                 uint48(block.timestamp + 60)
             );
         } else {
