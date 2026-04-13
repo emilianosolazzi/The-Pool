@@ -19,6 +19,7 @@ import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {LiquidityAmounts} from "v4-core-test/utils/LiquidityAmounts.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
+import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 
 contract LiquidityVault is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     using Math for uint256;
@@ -33,6 +34,8 @@ contract LiquidityVault is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
 
     IPoolManager public immutable poolManager;
     IPositionManager public immutable positionManager;
+    /// @dev Canonical Permit2 address. address(0) in test environments (mocked positionManager).
+    address public immutable permit2;
     PoolKey public poolKey;
 
     uint256 public totalLiquidityDeployed;  // raw Uniswap L units (for display)
@@ -65,11 +68,18 @@ contract LiquidityVault is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         IPoolManager _poolManager,
         IPositionManager _posManager,
         string memory _name,
-        string memory _symbol
+        string memory _symbol,
+        address _permit2
     ) ERC4626(_asset) ERC20(_name, _symbol) Ownable(msg.sender) {
         poolManager = _poolManager;
         positionManager = _posManager;
+        permit2 = _permit2;
         treasury = msg.sender;
+        // One-time infinite approval so Permit2 can pull asset tokens on behalf of this vault.
+        // Skipped when _permit2 is address(0) (test environments with mock PositionManager).
+        if (_permit2 != address(0)) {
+            IERC20(address(_asset)).approve(_permit2, type(uint256).max);
+        }
     }
 
     function totalAssets() public view override returns (uint256) {
@@ -156,7 +166,7 @@ contract LiquidityVault is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
             params[0] = abi.encode(poolKey, tickLower, tickUpper, liquidity, amount, amount, address(this), "");
             params[1] = abi.encode(poolKey.currency0, poolKey.currency1);
 
-            IERC20(asset()).approve(address(positionManager), amount);
+            _approveForPositionManager(amount);
             uint256 expectedTokenId = positionManager.nextTokenId();
             uint256 balBefore = IERC20(asset()).balanceOf(address(this));
             positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp + 60);
@@ -169,7 +179,7 @@ contract LiquidityVault is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
             params[0] = abi.encode(positionTokenId, liquidity, amount, amount, "");
             params[1] = abi.encode(poolKey.currency0, poolKey.currency1);
 
-            IERC20(asset()).approve(address(positionManager), amount);
+            _approveForPositionManager(amount);
             uint256 balBefore = IERC20(asset()).balanceOf(address(this));
             positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp + 60);
             uint256 spent = balBefore - IERC20(asset()).balanceOf(address(this));
@@ -178,6 +188,22 @@ contract LiquidityVault is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
 
         totalLiquidityDeployed += liquidity;
         emit LiquidityDeployed(amount, 0, liquidity);
+    }
+
+    /// @dev Grants the PositionManager permission to pull `amount` of asset tokens
+    ///      via Permit2. Falls back to a direct ERC20 approve when Permit2 is not
+    ///      available (test environments using a mock PositionManager).
+    function _approveForPositionManager(uint256 amount) internal {
+        if (permit2 != address(0)) {
+            IAllowanceTransfer(permit2).approve(
+                asset(),
+                address(positionManager),
+                uint160(amount),
+                uint48(block.timestamp + 60)
+            );
+        } else {
+            IERC20(asset()).approve(address(positionManager), amount);
+        }
     }
 
     function _removeLiquidity(uint256 proportion) internal {
