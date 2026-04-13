@@ -121,7 +121,8 @@ contract VaultInvariantTest is StdInvariant, Test {
             IPoolManager(address(mockManager)),
             IPositionManager(address(mockPosMgr)),
             "LP Vault",
-            "LPV"
+            "LPV",
+            address(0)  // no Permit2 in test environment
         );
 
         // Build PoolKey

@@ -84,8 +84,14 @@ contract Deploy is Script {
         // so the hook constructor arg is known before any contract is deployed.
         address deployerAddr = msg.sender;
         address expectedDistributor = vm.computeCreateAddress(deployerAddr, vm.getNonce(deployerAddr));
+
+        // Foundry routes `new Contract{salt: salt}()` through the deterministic
+        // CREATE2 factory (0x4e59b44847b379578588920cA78FbF26c0B4956C), NOT the
+        // EOA directly. HookMiner must use the factory address so the computed
+        // hook address matches what actually gets deployed on-chain.
+        address create2Factory = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
         (address hookAddr, bytes32 salt) = HookMiner.find(
-            deployerAddr,
+            create2Factory,
             flags,
             type(DynamicFeeHook).creationCode,
             abi.encode(address(poolManager), expectedDistributor)
@@ -109,7 +115,8 @@ contract Deploy is Script {
             poolManager,
             posManager,
             "DeFi Hook LP Vault",
-            "dHOOK-LPV"
+            "dHOOK-LPV",
+            0x000000000022D473030F116dDEE9F6B43aC78BA3  // canonical Permit2
         );
         vault.setTreasury(treasury);
         if (perfFeeBps > 0) vault.setPerformanceFeeBps(perfFeeBps);
