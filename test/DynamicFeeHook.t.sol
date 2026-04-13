@@ -220,4 +220,14 @@ contract DynamicFeeHookTest is Test {
         uint256 cap = (amountIn * hook.maxFeeBps()) / 10_000;
         assertLe(fee, cap == 0 ? 0 : cap + 1); // allow 1 wei rounding
     }
+
+    /// getVolatilityInfo returns correct constants and zero state before any swap.
+    function test_getVolatilityInfo_defaults() public view {
+        (uint256 thresholdBps, uint256 multiplierPct, uint160 refPrice, uint256 refBlock) =
+            hook.getVolatilityInfo();
+        assertEq(thresholdBps,  100); // 1% inter-swap price move triggers multiplier
+        assertEq(multiplierPct, 150); // 1.5x fee in volatile regime
+        assertEq(refPrice,        0); // no swaps have occurred yet
+        assertEq(refBlock,        0); // no swaps have occurred yet
+    }
 }
