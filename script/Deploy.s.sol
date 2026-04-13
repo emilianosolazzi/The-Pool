@@ -96,6 +96,10 @@ contract Deploy is Script {
         console2.log("FeeDistributor deployed:", address(distributor));
 
         // ── 2. LiquidityVault (ERC-4626, token0 as underlying asset) ─────────
+        // NOTE: The vault is always single-sided on token0. If your target pool
+        // uses token1 as the deposit asset (e.g. WETH in a USDC/WETH pool where
+        // WETH > USDC numerically), swap TOKEN0 and TOKEN1 in your .env so that
+        // the desired asset sorts lower. Uniswap v4 requires currency0 < currency1.
         LiquidityVault vault = new LiquidityVault(
             IERC20(token0Addr),
             poolManager,
