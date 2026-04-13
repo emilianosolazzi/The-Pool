@@ -311,6 +311,14 @@ contract LiquidityVault is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         poolKey = _poolKey;
         assetIsToken0 = _isToken0;
         _poolKeySet = true;
+        // Approve Permit2 for the non-asset currency so SETTLE_PAIR doesn't
+        // revert with InsufficientAllowance even when the settlement amount is 0.
+        if (permit2 != address(0)) {
+            address otherCurrency = _isToken0
+                ? Currency.unwrap(_poolKey.currency1)
+                : Currency.unwrap(_poolKey.currency0);
+            IERC20(otherCurrency).approve(permit2, type(uint256).max);
+        }
         emit PoolKeySet(PoolId.unwrap(_poolKey.toId()));
     }
 
