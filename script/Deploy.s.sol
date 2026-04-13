@@ -10,6 +10,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
 
 import {DynamicFeeHook} from "../src/DynamicFeeHook.sol";
 import {FeeDistributor} from "../src/FeeDistributor.sol";
@@ -36,8 +37,11 @@ import {HookMiner} from "../test/utils/HookMiner.sol";
 ///      POOL_FEE            Uniswap v4 pool fee tier (uint24)       [default: 100 = 0.01%]
 ///      TICK_SPACING        Pool tick spacing (int24)               [default: 1]
 ///      SQRT_PRICE_X96      Initial pool price as Q64.96            [default: 1:1]
-///      OWNER               Multisig/timelock to receive ownership  [default: deployer keeps ownership]
-///                          Recipient must call acceptOwnership() on each contract to finalise.
+///      OWNER               Multisig address to set as timelock proposer [default: no timelock, deployer keeps ownership]
+///      TIMELOCK_DELAY      Seconds before queued owner actions execute  [default: 172800 = 48 h]
+///                          When OWNER is set a TimelockController is deployed and ownership of all
+///                          three contracts is transferred to it. The multisig (OWNER) must then
+///                          call acceptOwnership() on each contract via the timelock.
 ///
 /// @dev Run on Arbitrum One:
 ///      forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast --verify
@@ -62,10 +66,10 @@ contract Deploy is Script {
         uint24  poolFee     = uint24(vm.envOr("POOL_FEE",     uint256(100)));   // 0.01%
         int24   tickSpacing = int24(vm.envOr("TICK_SPACING",  int256(1)));
         uint160 sqrtPrice   = uint160(vm.envOr("SQRT_PRICE_X96", uint256(DEFAULT_SQRT_PRICE)));
-        // If set, ownership of all three contracts is transferred to this address after deploy.
-        // The recipient must call acceptOwnership() to complete the Ownable2Step handoff.
-        // Defaults to address(0) = no transfer (deployer retains ownership).
-        address owner       = vm.envOr("OWNER", address(0));
+        // If set, a TimelockController is deployed with OWNER as proposer and ownership
+        // of all three contracts is transferred to it. Set to address(0) to skip (deployer keeps ownership).
+        address owner          = vm.envOr("OWNER", address(0));
+        uint256 timelockDelay  = vm.envOr("TIMELOCK_DELAY", uint256(2 days)); // default 48 h
 
         IPoolManager     poolManager = IPoolManager(poolManagerAddr);
         IPositionManager posManager  = IPositionManager(posManagerAddr);
@@ -138,14 +142,31 @@ contract Deploy is Script {
         distributor.setPoolKey(poolKey);
         vault.setPoolKey(poolKey);
 
-        // ── 7. Transfer ownership to multisig / timelock (optional) ──────────
-        // Ownable2Step: the new owner must call acceptOwnership() to finalise.
-        // Skip if OWNER env var was not set (deployer retains ownership).
+        // ── 7. Deploy timelock + transfer ownership (optional) ───────────────
+        // When OWNER is provided: deploy a TimelockController (proposer = OWNER,
+        // open executor, admin = OWNER) and initiate Ownable2Step transfer to it.
+        // The multisig must complete each handoff by calling acceptOwnership() on
+        // each contract via the timelock after the delay expires.
+        // Skip entirely if OWNER is not set — deployer retains ownership.
+        address timelockAddr = address(0);
         if (owner != address(0)) {
-            distributor.transferOwnership(owner);
-            vault.transferOwnership(owner);
-            hook.transferOwnership(owner);
-            console2.log("Ownership transfer initiated to:", owner);
+            address[] memory proposers = new address[](1);
+            proposers[0] = owner;
+            address[] memory executors = new address[](1);
+            executors[0] = address(0); // open execution: anyone can execute after delay
+
+            TimelockController timelock = new TimelockController(
+                timelockDelay, proposers, executors, owner
+            );
+            timelockAddr = address(timelock);
+
+            distributor.transferOwnership(timelockAddr);
+            vault.transferOwnership(timelockAddr);
+            hook.transferOwnership(timelockAddr);
+            console2.log("TimelockController deployed:", timelockAddr);
+            console2.log("Ownership transfer initiated to timelock:", timelockAddr);
+            console2.log("Timelock proposer (multisig):", owner);
+            console2.log("Timelock delay (seconds):", timelockDelay);
         }
 
         vm.stopBroadcast();
@@ -160,6 +181,8 @@ contract Deploy is Script {
         console2.log("Perf Fee BPS    :", perfFeeBps);
         console2.log("Max TVL         :", maxTVL);
         console2.log("Max Fee BPS     :", maxFeeBps);
-        console2.log("Pending Owner   :", owner == address(0) ? deployerAddr : owner);
+        console2.log("Timelock        :", timelockAddr == address(0) ? address(0) : timelockAddr);
+        console2.log("Timelock Delay  :", timelockDelay);
+        console2.log("Effective Owner :", timelockAddr != address(0) ? timelockAddr : deployerAddr);
     }
 }

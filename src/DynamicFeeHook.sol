@@ -160,6 +160,30 @@ contract DynamicFeeHook is BaseHook, Ownable2Step {
         description = "Base: 6 BPS treasury / 24 BPS LP; Volatile 1.5x: 9 BPS treasury / 36 BPS LP -- capped at maxFeeBps";
     }
 
+    /// @notice Returns the volatility oracle parameters that govern the 1.5x fee multiplier.
+    /// @dev    Anti-manipulation: lastSqrtPriceX96 is only refreshed once per block
+    ///         (guarded by lastSwapBlock). A flash loan that shifts sqrtPriceX96
+    ///         within the same block cannot update the reference price — the
+    ///         attacker's own exploit swap already sees the pre-existing large delta
+    ///         and pays the 1.5x multiplier, making the attack economically
+    ///         self-defeating. The reference price therefore always lags at least one
+    ///         block behind the current price, preventing intra-block oracle manipulation.
+    function getVolatilityInfo()
+        external
+        view
+        returns (
+            uint256 thresholdBps,
+            uint256 multiplierPct,
+            uint160 referenceSqrtPriceX96,
+            uint256 referenceBlock
+        )
+    {
+        thresholdBps = VOLATILITY_THRESHOLD_BPS;
+        multiplierPct = VOLATILITY_FEE_MULTIPLIER;
+        referenceSqrtPriceX96 = lastSqrtPriceX96;
+        referenceBlock = lastSwapBlock;
+    }
+
     function getStats() external view returns (uint256, uint256, address) {
         return (totalSwaps, totalFeesRouted, address(feeDistributor));
     }
