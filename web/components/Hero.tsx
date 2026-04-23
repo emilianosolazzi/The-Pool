@@ -1,11 +1,11 @@
 export function Hero({ pairSymbol }: { pairSymbol: string }) {
   return (
     <section className="relative overflow-hidden border-b border-white/5">
-      <div className="absolute inset-0 bg-grid-fade pointer-events-none" />
+      <div className="absolute inset-0 bg-hero-mesh pointer-events-none" />
       <div className="relative mx-auto max-w-6xl px-4 py-20 md:py-28">
         <div className="mb-6 flex flex-wrap gap-2">
           <span className="chip">
-            <span className="h-1.5 w-1.5 rounded-full bg-lime-400" />
+            <span className="h-1.5 w-1.5 rounded-full bg-accent-400 shadow-[0_0_10px_rgba(255,92,184,0.8)]" />
             Fee-only yield
           </span>
           <span className="chip">25 bps dynamic hook fee</span>
@@ -14,11 +14,9 @@ export function Hero({ pairSymbol }: { pairSymbol: string }) {
         </div>
         <h1 className="max-w-3xl text-4xl font-semibold tracking-tight text-white md:text-6xl">
           Auto-compounding LP yield on{' '}
-          <span className="bg-gradient-to-br from-accent-400 to-lime-400 bg-clip-text text-transparent">
-            Uniswap&nbsp;v4.
-          </span>
+          <span className="gradient-text">Uniswap&nbsp;v4.</span>
         </h1>
-        <p className="mt-5 max-w-2xl text-balance text-lg text-zinc-400">
+        <p className="mt-5 max-w-2xl text-balance text-lg text-zinc-300/90">
           The Pool attaches a programmable fee layer to any v4 concentrated-liquidity
           pool. 20% of every swap fee funds the treasury; 80% is donated back to
           the pool on the same transaction. Share price appreciates automatically —
@@ -34,8 +32,9 @@ export function Hero({ pairSymbol }: { pairSymbol: string }) {
           >
             Read the architecture
           </a>
-          <span className="ml-1 text-sm text-zinc-500">
-            Reference deployment: <span className="font-mono text-zinc-300">{pairSymbol}</span> · Arbitrum&nbsp;One
+          <span className="ml-1 text-sm text-zinc-400">
+            Reference deployment:{' '}
+            <span className="font-mono text-zinc-200">{pairSymbol}</span> · Arbitrum&nbsp;One
           </span>
         </div>
       </div>

@@ -8,43 +8,69 @@
   color-scheme: dark;
 }
 
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: 'cv11', 'ss01', 'ss03';
+}
+
 html,
 body {
-  background: #05060a;
-  color: #e5e7eb;
+  background: #0b0420;
+  color: #f4e9ff;
   min-height: 100%;
 }
 
 body {
   background-image:
-    radial-gradient(1200px 600px at 50% -200px, rgba(56, 189, 248, 0.12), transparent 60%),
-    radial-gradient(800px 400px at 90% 10%, rgba(163, 230, 53, 0.06), transparent 60%);
+    radial-gradient(1400px 700px at 15% -10%, rgba(255, 42, 158, 0.28), transparent 55%),
+    radial-gradient(1000px 500px at 92% 8%, rgba(139, 92, 246, 0.22), transparent 60%),
+    radial-gradient(900px 500px at 50% 110%, rgba(88, 28, 135, 0.35), transparent 60%);
   background-attachment: fixed;
+}
+
+/* Subtle animated grain to kill banding on the gradient */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.06 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  opacity: 0.5;
+  mix-blend-mode: overlay;
 }
 
 @layer utilities {
   .card {
-    @apply relative rounded-2xl border border-white/5 bg-ink-900/60 backdrop-blur-sm;
+    @apply relative rounded-2xl border border-white/10 bg-white/[0.03] backdrop-blur-xl;
   }
   .card-hover {
-    @apply transition hover:border-accent-500/30 hover:shadow-glow;
+    @apply transition hover:border-accent-500/40 hover:shadow-glow;
   }
   .chip {
-    @apply inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-xs font-medium text-zinc-300;
+    @apply inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-xs font-medium text-zinc-200;
   }
   .stat-label {
-    @apply text-[11px] uppercase tracking-widest text-zinc-500;
+    @apply text-[11px] uppercase tracking-widest text-zinc-400;
   }
   .stat-value {
     @apply font-mono text-2xl font-semibold text-white;
   }
   .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-accent-500 px-4 py-2.5 text-sm font-semibold text-ink-950 transition hover:bg-accent-400 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-accent-500 to-iris-500 px-4 py-2.5 text-sm font-semibold text-white shadow-glow transition hover:from-accent-400 hover:to-iris-400 disabled:cursor-not-allowed disabled:opacity-50;
   }
   .btn-ghost {
-    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-medium text-zinc-200 transition hover:border-white/20 hover:bg-white/10;
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-medium text-zinc-100 transition hover:border-white/20 hover:bg-white/10;
   }
   .input {
-    @apply w-full rounded-xl border border-white/10 bg-ink-800/80 px-3 py-2.5 font-mono text-sm text-white placeholder-zinc-600 outline-none transition focus:border-accent-500/50;
+    @apply w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2.5 font-mono text-sm text-white placeholder-zinc-500 outline-none transition focus:border-accent-500/60 focus:ring-2 focus:ring-accent-500/20;
+  }
+  .gradient-text {
+    @apply bg-gradient-to-br from-accent-400 via-accent-500 to-iris-500 bg-clip-text text-transparent;
   }
 }
+
+/* Ensure content sits above the noise overlay */
+main, header, footer { position: relative; z-index: 1; }

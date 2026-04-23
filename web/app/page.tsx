@@ -3,6 +3,7 @@
 import { useChainId } from 'wagmi';
 import { Nav } from '@/components/Nav';
 import { Hero } from '@/components/Hero';
+import { PlainEnglish } from '@/components/PlainEnglish';
 import { StatsGrid } from '@/components/StatsGrid';
 import { VaultCard } from '@/components/VaultCard';
 import { HowItWorks } from '@/components/HowItWorks';
@@ -19,6 +20,8 @@ export default function HomePage() {
       <Nav />
       <main>
         <Hero pairSymbol={deployment.pairSymbol} />
+
+        <PlainEnglish deployment={deployment} />
 
         <section id="vault" className="mx-auto max-w-6xl px-4 py-16">
           <div className="mb-8 flex items-end justify-between">
