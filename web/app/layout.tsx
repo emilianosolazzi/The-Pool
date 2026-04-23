@@ -1,7 +1,20 @@
 import type { Metadata } from 'next';
+import { Inter, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 import '@rainbow-me/rainbowkit/styles.css';
 import { Providers } from './providers';
+
+const inter = Inter({
+  subsets: ['latin'],
+  variable: '--font-sans',
+  display: 'swap',
+});
+
+const jetbrains = JetBrains_Mono({
+  subsets: ['latin'],
+  variable: '--font-mono',
+  display: 'swap',
+});
 
 export const metadata: Metadata = {
   title: 'The Pool — Auto-compounding Uniswap v4 LP yield',
@@ -18,8 +31,8 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" suppressHydrationWarning>
-      <body className="antialiased">
+    <html lang="en" className={`${inter.variable} ${jetbrains.variable}`} suppressHydrationWarning>
+      <body className="font-sans antialiased">
         <Providers>{children}</Providers>
       </body>
     </html>
