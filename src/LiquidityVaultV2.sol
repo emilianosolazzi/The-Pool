@@ -42,6 +42,14 @@ interface IReserveHook {
     function offerActive(PoolKey calldata key) external view returns (bool);
 }
 
+/// @notice Minimal interface for the BootstrapRewards bonus program. The vault
+///         calls `poke(user)` on every share balance change so that the lazy
+///         share-second accrual model never under-credits a depositor who
+///         forgot to poke before depositing/withdrawing/transferring.
+interface IBootstrapRewardsPoke {
+    function poke(address user) external;
+}
+
 /// @notice ERC-4626 USDC-entry vault that can zap into active dual-token v4 liquidity.
 /// @dev    External swaps go through a narrow zap-router adapter. The vault
 ///         never accepts arbitrary router calldata.
@@ -79,6 +87,11 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     uint256 public txDeadlineSeconds = 300;
     address public zapRouter;
     address public reserveHook;
+    /// @notice Optional BootstrapRewards bonus program. When set, every share
+    ///         balance mutation (mint/burn/transfer) auto-pokes the affected
+    ///         users. Defensive try/catch ensures a misbehaving rewards
+    ///         contract can never DoS deposits or withdrawals.
+    address public bootstrapRewards;
 
     enum VaultStatus {
         UNCONFIGURED,
@@ -107,6 +120,8 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     event ReserveOfferEscrowed(address indexed sellCurrency, uint128 sellAmount, uint160 vaultSqrtPriceX96, uint64 expiry);
     event ReserveOfferReturned(address indexed sellCurrency, uint128 returned);
     event ReserveProceedsCollected(address indexed currency, uint256 amount);
+    event BootstrapRewardsUpdated(address indexed oldRewards, address indexed newRewards);
+    event BootstrapPokeFailed(address indexed user, bytes reason);
 
     constructor(
         IERC20 _asset,
@@ -647,6 +662,14 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         reserveHook = newHook;
     }
 
+    /// @notice Bind (or unbind) the BootstrapRewards bonus program. Setting
+    ///         to address(0) disables auto-poke; non-zero must be a contract.
+    function setBootstrapRewards(address newRewards) external onlyOwner {
+        require(newRewards == address(0) || newRewards.code.length > 0, "NOT_CONTRACT");
+        emit BootstrapRewardsUpdated(bootstrapRewards, newRewards);
+        bootstrapRewards = newRewards;
+    }
+
     /// @notice Escrow vault inventory at the hook as a reserve offer.
     /// @param  sellCurrency must be one of the pool currencies.
     /// @param  sellAmount inventory to lock at the hook (vault must hold it).
@@ -786,6 +809,28 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         if (h.proceedsOwed(address(this), c1) > 0) {
             uint256 a1 = h.claimReserveProceeds(c1);
             if (a1 > 0) emit ReserveProceedsCollected(Currency.unwrap(c1), a1);
+        }
+    }
+
+    /// @notice ERC20 hook override. Auto-pokes the BootstrapRewards bonus
+    ///         program for both ends of any share movement (mint, burn, or
+    ///         transfer) so depositors never need to remember to poke.
+    /// @dev    The poke is wrapped in try/catch and emits BootstrapPokeFailed
+    ///         on revert so a misbehaving rewards contract can never block
+    ///         vault deposits, withdrawals, or share transfers.
+    function _update(address from, address to, uint256 value) internal override {
+        super._update(from, to, value);
+        address rewards = bootstrapRewards;
+        if (rewards == address(0)) return;
+        if (from != address(0)) _pokeBootstrap(rewards, from);
+        if (to != address(0)) _pokeBootstrap(rewards, to);
+    }
+
+    function _pokeBootstrap(address rewards, address user) private {
+        try IBootstrapRewardsPoke(rewards).poke(user) {
+            // ok
+        } catch (bytes memory reason) {
+            emit BootstrapPokeFailed(user, reason);
         }
     }
 }

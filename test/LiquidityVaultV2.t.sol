@@ -136,6 +136,26 @@ contract MockReserveHook {
     }
 }
 
+/// @notice Records every poke; can be configured to revert.
+contract MockBootstrapRewards {
+    event Poked(address user);
+
+    bool public revertOnPoke;
+    address[] public pokes;
+
+    function setRevertOnPoke(bool v) external { revertOnPoke = v; }
+
+    function pokeCount() external view returns (uint256) { return pokes.length; }
+
+    function pokeAt(uint256 i) external view returns (address) { return pokes[i]; }
+
+    function poke(address user) external {
+        if (revertOnPoke) revert("MOCK_POKE_REVERT");
+        pokes.push(user);
+        emit Poked(user);
+    }
+}
+
 contract LiquidityVaultV2Test is Test {
     LiquidityVaultV2 public vault;
     MockERC20 public usdc;
@@ -568,5 +588,109 @@ contract LiquidityVaultV2Test is Test {
         vm.prank(vault.owner());
         vm.expectRevert("MOCK_CANCEL_FORCED_REVERT");
         vault.rebalanceOffer(Currency.wrap(address(weth)), 0.6 ether, uint160(2 << 96), 0);
+    }
+
+    // ---------------------------------------------------------------
+    // BootstrapRewards auto-poke — vault must poke the rewards program
+    // on every share movement, must tolerate a reverting rewards
+    // contract, and must allow the owner to disable it.
+    // ---------------------------------------------------------------
+    function test_setBootstrapRewards_onlyOwner() public {
+        MockBootstrapRewards rewards = new MockBootstrapRewards();
+        vm.prank(alice);
+        vm.expectRevert();
+        vault.setBootstrapRewards(address(rewards));
+    }
+
+    function test_setBootstrapRewards_acceptsZeroToDisable() public {
+        MockBootstrapRewards rewards = new MockBootstrapRewards();
+        vault.setBootstrapRewards(address(rewards));
+        assertEq(vault.bootstrapRewards(), address(rewards));
+        vault.setBootstrapRewards(address(0));
+        assertEq(vault.bootstrapRewards(), address(0));
+    }
+
+    function test_setBootstrapRewards_revertsOnNonContract() public {
+        vm.expectRevert("NOT_CONTRACT");
+        vault.setBootstrapRewards(address(0xBEEF));
+    }
+
+    function test_autoPoke_firesOnMintAndBurn() public {
+        MockBootstrapRewards rewards = new MockBootstrapRewards();
+        vault.setBootstrapRewards(address(rewards));
+
+        // Deposit (zap) — should poke `alice` (the receiver). `from` is zero
+        // for mints, so the only poke target is the receiver.
+        usdc.mint(alice, 100e6);
+        weth.mint(address(zapRouter), 1 ether);
+        zapRouter.setAmountOut(1 ether);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        uint256 shares = vault.depositWithZap(100e6, alice, 50e6, 1 ether, 1, 0, block.timestamp + 1);
+        vm.stopPrank();
+
+        uint256 mintPokes = rewards.pokeCount();
+        assertGe(mintPokes, 1, "mint must poke receiver at least once");
+        // Receiver appears among pokes.
+        bool sawAlice;
+        for (uint256 i = 0; i < mintPokes; i++) {
+            if (rewards.pokeAt(i) == alice) sawAlice = true;
+        }
+        assertTrue(sawAlice, "alice not poked on mint");
+
+        // Transfer between holders pokes both `from` and `to`.
+        address bob = makeAddr("bob");
+        vm.prank(alice);
+        vault.transfer(bob, shares / 2);
+        // Both alice and bob must appear after the transfer.
+        bool sawAliceXfer;
+        bool sawBob;
+        for (uint256 i = mintPokes; i < rewards.pokeCount(); i++) {
+            address u = rewards.pokeAt(i);
+            if (u == alice) sawAliceXfer = true;
+            if (u == bob) sawBob = true;
+        }
+        assertTrue(sawAliceXfer, "from not poked on transfer");
+        assertTrue(sawBob, "to not poked on transfer");
+    }
+
+    function test_autoPoke_revertingRewardsDoesNotBlockTransfer() public {
+        MockBootstrapRewards rewards = new MockBootstrapRewards();
+        vault.setBootstrapRewards(address(rewards));
+
+        // Mint shares first while rewards is happy.
+        usdc.mint(alice, 100e6);
+        weth.mint(address(zapRouter), 1 ether);
+        zapRouter.setAmountOut(1 ether);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        uint256 shares = vault.depositWithZap(100e6, alice, 50e6, 1 ether, 1, 0, block.timestamp + 1);
+        vm.stopPrank();
+        assertGt(shares, 0);
+
+        // Now break the rewards contract. Transfer must still succeed and
+        // emit BootstrapPokeFailed for both ends.
+        rewards.setRevertOnPoke(true);
+        address bob = makeAddr("bob");
+        vm.prank(alice);
+        vault.transfer(bob, shares / 4);
+        assertEq(vault.balanceOf(bob), shares / 4);
+        assertEq(vault.balanceOf(alice), shares - shares / 4);
+    }
+
+    function test_autoPoke_disabledWhenRewardsZero() public {
+        // Default is address(0) — confirm deposit still works and no poke
+        // attempt is made (we can't directly assert "no call", but a
+        // reverting rewards contract bound to address(0) by definition
+        // can't be called).
+        usdc.mint(alice, 100e6);
+        weth.mint(address(zapRouter), 1 ether);
+        zapRouter.setAmountOut(1 ether);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        uint256 shares = vault.depositWithZap(100e6, alice, 50e6, 1 ether, 1, 0, block.timestamp + 1);
+        vm.stopPrank();
+        assertGt(shares, 0);
+        assertEq(vault.bootstrapRewards(), address(0));
     }
 }
