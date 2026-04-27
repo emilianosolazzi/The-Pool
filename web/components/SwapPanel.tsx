@@ -259,9 +259,17 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
       ? { label: 'Approve Permit2 for Universal Router', onClick: onApprovePermit2 }
       : { label: `Swap ${inputSymbol} for ${outputSymbol}`, onClick: onSwap };
 
+  // Pool is "seeded" only if the LiquidityVault has deployed a real position
+  // into v4. liqDeployed comes from getVaultStats() and is the position's L.
+  // Below ~1e9 it's effectively dust (75 wei in current state), and the
+  // hook's afterSwap donate() will revert with NoLiquidityToReceiveFees().
+  const liqDeployed = vaultStats?.[3] ?? 0n;
+  const poolSeeded = liqDeployed > 1_000_000_000n; // 1e9 L threshold
+
   const swapDisabled =
     amountIn === 0n ||
     !amountOut ||
+    !poolSeeded ||
     isPending ||
     isMining ||
     (inBalance !== undefined && amountIn > inBalance);
@@ -279,6 +287,17 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
       </div>
 
       <div className="card p-5 md:p-6">
+        {!poolSeeded ? (
+          <div className="mb-4 rounded-xl border border-amber-400/30 bg-amber-500/5 p-3 text-xs text-amber-200">
+            <div className="font-semibold text-amber-100">Pool not yet seeded with active liquidity</div>
+            <div className="mt-1 text-amber-200/80">
+              The LiquidityVault hasn&apos;t deployed a v4 position yet, so swaps through the hook
+              revert with <code className="text-amber-100">NoLiquidityToReceiveFees</code>. Bootstrap
+              epoch 0 must complete and the owner must call <code className="text-amber-100">rebalance()</code>
+              to mint the initial range. Until then, the form is preview-only.
+            </div>
+          </div>
+        ) : null}
         {/* Input row */}
         <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
           <div className="flex items-center justify-between text-xs text-zinc-400">
@@ -348,7 +367,9 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
           ) : null}
           {quoteErr && amountIn > 0n ? (
             <div className="mt-2 text-xs text-rose-300">
-              Quote failed — pool may have insufficient liquidity for this size.
+              {poolSeeded
+                ? 'Quote failed — pool may have insufficient liquidity for this size.'
+                : 'Quote failed — pool has no in-range liquidity yet (see banner above).'}
             </div>
           ) : null}
         </div>
