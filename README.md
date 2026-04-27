@@ -42,6 +42,8 @@ Each swap attempts to apply a 25 BPS hook fee. During periods of elevated volati
 | `src/DynamicFeeHookV2.sol` | Fee computation, volatility multiplier, reserve-sale fills, failed-distribution accounting, fee routing |
 | `src/FeeDistributor.sol` | Default 20 / 80 treasury-to-LP fee split via `poolManager.donate()`; treasury share owner-adjustable, hard-capped at 50% |
 | `src/LiquidityVaultV2.sol` | ERC-4626 vault — deposits, withdrawals, rebalances, reserve-offer glue, NAV deviation guard |
+| `src/BootstrapRewards.sol` | Early-depositor bonus program — epoch share-second accrual, lazy poke, pull-style claims |
+| `src/SwapRouter02ZapAdapter.sol` | Narrow adapter from `LiquidityVaultV2` to Uniswap V3 SwapRouter02 `exactInputSingle` for zap deposits/withdrawals |
 
 For a full description of state machines, data flows, and invariants, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -100,7 +102,7 @@ forge test --no-match-contract "Invariant"
 forge test
 ```
 
-**221/221 tests passing** (216 deterministic + 5 handler-driven fuzz invariants, default invariant profile: 256 runs × depth 15).
+**228/228 tests passing** (V2.2 hardening baseline: deterministic suites plus 5 handler-driven fuzz invariants, default invariant profile: 256 runs × depth 15).
 
 ### Deploy
 
@@ -123,7 +125,7 @@ ASSET_TOKEN=         # Must equal TOKEN0 or TOKEN1
 
 #### Reference deployment — USDC / WETH on Arbitrum One
 
-The vault is **single-sided out-of-range** by design: it holds one asset and earns fees while waiting to convert into the other across a configured tick band. For a USDC-deposit vault on the Arbitrum USDC / WETH pair, WETH (`0x82aF…`) sorts below USDC (`0xaf88…`), so `TOKEN0=WETH`, `TOKEN1=USDC`, and `ASSET_TOKEN=TOKEN1`. **Pool: 0.05% fee tier (`POOL_FEE=500`), `TICK_SPACING=10`.** Default ticks in [`LiquidityVaultV2`](src/LiquidityVaultV2.sol) (`tickLower = -201360`, `tickUpper = -193200`, both multiples of 10) target the ≈ \$1,800 – \$4,065 WETH/USDC corridor: the vault deploys 100% USDC while ETH is above the band and steadily converts to WETH as price falls into range. The owner can `rebalance(newTickLower, newTickUpper)` any time to a new pair of tick-spacing-aligned ticks. A ready-to-edit preset lives in [`.env.example`](.env.example).
+The vault is **single-sided out-of-range** by design: it holds one asset and earns fees while waiting to convert into the other across a configured tick band. For a USDC-deposit vault on the Arbitrum USDC / WETH pair, WETH (`0x82aF…`) sorts below USDC (`0xaf88…`), so `TOKEN0=WETH`, `TOKEN1=USDC`, and `ASSET_TOKEN=TOKEN1`. **Pool: 0.05% fee tier (`POOL_FEE=500`), `TICK_SPACING=60`.** Default ticks in [`LiquidityVaultV2`](src/LiquidityVaultV2.sol) (`tickLower = -199020`, `tickUpper = -198840`, both multiples of 60) target a narrow band centred on the current WETH/USDC spot price: the vault deploys both sides while spot is inside the band and holds idle inventory in either currency when spot drifts out. The owner can `rebalance(newTickLower, newTickUpper)` any time to a new pair of tick-spacing-aligned ticks. A ready-to-edit preset lives in [`.env.example`](.env.example).
 
 Optional parameters with their script defaults (the live Arbitrum One deployment overrides `POOL_FEE` / `TICK_SPACING` via `.env.example` to match the 0.05% USDC/WETH pool):
 
@@ -132,34 +134,36 @@ PERFORMANCE_FEE_BPS=400    # Vault yield cut sent to treasury (0–2000 BPS)
 MAX_TVL=0                  # Deposit ceiling in asset-token units; 0 = unlimited
 MAX_FEE_BPS=50             # Hook fee ceiling in BPS (hard cap, max 1000)
 POOL_FEE=500               # Uniswap v4 pool fee tier (0.05%; reference deployment)
-TICK_SPACING=10            # Pool tick spacing (matches POOL_FEE=500)
+TICK_SPACING=60            # Pool tick spacing (matches the live Arbitrum One USDC/WETH pool)
 SQRT_PRICE_X96=            # Initial pool price; omit to default to 1:1
 ```
 
 Broadcast the deployment:
 
 ```bash
-forge script script/Deploy.s.sol --broadcast --rpc-url $ARBITRUM_RPC_URL
+forge script script/DeployHookV2AndVault.s.sol --broadcast --rpc-url $ARBITRUM_RPC_URL
 ```
 
-The deploy script mines a valid hook address (CREATE2 with permission bits), deploys all four contracts in dependency order, wires the circular references, initialises the pool, and registers the pool key on both the hook and the vault.
+The deploy script mines a valid hook address (CREATE2 with permission bits), deploys all four contracts in dependency order, wires the circular references, initialises the pool, and registers the pool key on both the hook and the vault. `BootstrapRewards` is deployed separately via [`script/DeployBootstrap.s.sol`](script/DeployBootstrap.s.sol) once the vault and distributor addresses are known.
 
 **Target network: Arbitrum One.**
 
 ### Live Arbitrum One deployment
 
+> **V2.2 redeploy pending.** The addresses below are the original V1 deployment of the protocol. They are listed here for historical traceability of the on-chain artifacts, but they do **not** match the current `src/` source: the live hook predates the V2 distributor-soft-fail and reserve-offer hardening described above. A fresh V2.2 deploy of `FeeDistributor`, `DynamicFeeHookV2`, `LiquidityVaultV2`, `SwapRouter02ZapAdapter`, and `BootstrapRewards` will replace these addresses; this section will be updated once the redeploy ships.
+>
 > Always verify current contract parameters on-chain before interacting; tick ranges, NAV reference, TVL cap, treasury, and fee settings may change through owner-controlled operations.
 
-| Component | Address |
+| Component | Address (V1, pending replacement) |
 |---|---|
 | FeeDistributor | `0x9e3aAb5DdBF536c087319431afCAf2F1160942e1` |
-| LiquidityVaultV2 | `0x02D5a1340D378695D50FF7dE0F5778018952c5EA` |
-| DynamicFeeHookV2 | `0x453CFf45DAC5116f8D49f7cfE6AEB56107a780c4` |
+| LiquidityVault | `0x02D5a1340D378695D50FF7dE0F5778018952c5EA` |
+| DynamicFeeHook | `0x453CFf45DAC5116f8D49f7cfE6AEB56107a780c4` |
 | BootstrapRewards | `0x029C2FEeB98050295C108E370fa74081ed58F978` |
 
 > The tick range above documents the **source defaults** in [`LiquidityVaultV2`](src/LiquidityVaultV2.sol). The live vault has been operationally `rebalance()`d since deployment and may sit at a different tick-spacing-aligned range. Read `tickLower` / `tickUpper` from the deployed contract for the current live corridor.
 
-Redeploy txs:
+Deploy txs (V1):
 - Deploy FeeDistributor: `0xa7aafdf7635948d964270ad47f68924d8b5baaeca24f085627c057564d70fb24`
 - Deploy LiquidityVaultV2: `0x36c5d0f0d36cdf519cf5acc42b6d77d960967a7c2cdd0f660d51b71c71ed96aa`
 - Deploy DynamicFeeHookV2: `0xe38566b012f57c6ca50708db08fbe730895bc17e3d8478dc8f934a16b0f1ca99`
@@ -194,8 +198,7 @@ All critical paths have been reviewed with emphasis on correctness, arithmetic p
 
 **Test suite:**
 
-- Current V2.2 baseline: **221/221 passing**
-- Deterministic suites: **216 tests**
+- Current V2.2 baseline: **228/228 passing**
 - Stateful invariant fuzz suites: **5 tests** at **256 runs × depth 15**
 
 ### Automated Audit: Complete

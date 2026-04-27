@@ -172,6 +172,11 @@ contract LiquidityVaultV2Test is Test {
     MockPoolManager public mockManager;
     MockPositionManager public mockPosMgr;
     MockZapRouter public zapRouter;
+    /// @dev Pre-deployed shared MockReserveHook used as `poolKey.hooks` so
+    ///      that `vault.setReserveHook(address(sharedReserveHook))` satisfies
+    ///      the production HOOK_MISMATCH guard. setUp re-runs per test, so
+    ///      each test sees a fresh instance.
+    MockReserveHook public sharedReserveHook;
 
     address public alice = makeAddr("alice");
     PoolKey public poolKey;
@@ -193,6 +198,8 @@ contract LiquidityVaultV2Test is Test {
             address(zapRouter)
         );
 
+        sharedReserveHook = new MockReserveHook();
+
         address lo = address(weth) < address(usdc) ? address(weth) : address(usdc);
         address hi = address(weth) < address(usdc) ? address(usdc) : address(weth);
         poolKey = PoolKey({
@@ -200,7 +207,7 @@ contract LiquidityVaultV2Test is Test {
             currency1: Currency.wrap(hi),
             fee: 500,
             tickSpacing: 60,
-            hooks: IHooks(address(vault))
+            hooks: IHooks(address(sharedReserveHook))
         });
 
         mockManager.setSlot0(TickMath.getSqrtPriceAtTick(-198900), -198900);
@@ -262,9 +269,9 @@ contract LiquidityVaultV2Test is Test {
     }
 
     function test_setReserveHook_setsAddress() public {
-        address hookStub = address(new MockPoolManager()); // any contract is fine for code-length check
-        vault.setReserveHook(hookStub);
-        assertEq(vault.reserveHook(), hookStub);
+        address hookAddr = address(sharedReserveHook);
+        vault.setReserveHook(hookAddr);
+        assertEq(vault.reserveHook(), hookAddr);
     }
 
     function test_offerReserveToHook_revertsWhenHookNotSet() public {
@@ -340,10 +347,88 @@ contract LiquidityVaultV2Test is Test {
     }
 
     // ---------------------------------------------------------------
+    // V2.2 hardening — out-of-range deposit, reserve-hook binding,
+    // rebalance tick validation.
+    // ---------------------------------------------------------------
+
+    /// @notice Plain deposit() must accept USDC even when the spot price is
+    ///         out of the configured tick band; vault holds idle inventory
+    ///         and mints shares without deploying liquidity.
+    function test_deposit_outOfRange_holdsIdleAndMintsShares() public {
+        // Default tick band is [-199020, -198840]. Push spot below the band.
+        mockManager.setSlot0(TickMath.getSqrtPriceAtTick(-200000), -200000);
+
+        usdc.mint(alice, 100e6);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        uint256 shares = vault.deposit(100e6, alice);
+        vm.stopPrank();
+
+        assertGt(shares, 0, "shares minted");
+        assertEq(vault.balanceOf(alice), shares, "shares credited");
+        assertEq(vault.totalLiquidityDeployed(), 0, "no liquidity deployed OOR");
+        assertEq(usdc.balanceOf(address(vault)), 100e6, "USDC held idle on vault");
+    }
+
+    /// @notice depositWithZap with minLiquidity > 0 must still revert OOR.
+    function test_depositWithZap_outOfRange_revertsWhenMinLiquidityRequired() public {
+        mockManager.setSlot0(TickMath.getSqrtPriceAtTick(-200000), -200000);
+
+        usdc.mint(alice, 100e6);
+        weth.mint(address(zapRouter), 1 ether);
+        zapRouter.setAmountOut(1 ether);
+
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vm.expectRevert("RANGE_NOT_ACTIVE");
+        vault.depositWithZap(100e6, alice, 50e6, 1 ether, 1, 0, block.timestamp + 1);
+        vm.stopPrank();
+    }
+
+    /// @notice setReserveHook rejects any address that is not poolKey.hooks.
+    function test_setReserveHook_revertsOnHookMismatch() public {
+        // A different deployed contract — has code but != poolKey.hooks.
+        address foreignHook = address(new MockReserveHook());
+        vm.expectRevert("HOOK_MISMATCH");
+        vault.setReserveHook(foreignHook);
+    }
+
+    /// @notice setReserveHook accepts the live poolKey.hooks address.
+    function test_setReserveHook_acceptsPoolKeyHook() public {
+        vault.setReserveHook(address(sharedReserveHook));
+        assertEq(vault.reserveHook(), address(sharedReserveHook));
+    }
+
+    /// @notice rebalance() rejects ticks that are not aligned to tickSpacing.
+    function test_rebalance_revertsOnUnalignedTicks() public {
+        // tickSpacing = 60. -3001 % 60 != 0.
+        vm.expectRevert("TICK_NOT_ALIGNED");
+        vault.rebalance(-3001, 3000, 0);
+    }
+
+    /// @notice rebalance() rejects ticks outside TickMath bounds.
+    function test_rebalance_revertsOnOutOfBoundTicks() public {
+        // TickMath.MAX_TICK = 887272; 887280 is past it (and 60-aligned).
+        vm.expectRevert("TICK_OUT_OF_BOUNDS");
+        vault.rebalance(-3000, 887280, 0);
+    }
+
+    /// @notice rebalance() with valid aligned ticks updates the band when no
+    ///         live position exists. (minLiquidity=0 lets it skip deploy.)
+    function test_rebalance_acceptsValidAlignedTicks() public {
+        // No prior position; no liquidity to remove. Spot doesn't matter
+        // because minLiquidity == 0 lets the deploy soft-fail.
+        mockManager.setSlot0(TickMath.getSqrtPriceAtTick(-200000), -200000);
+        vault.rebalance(-3000, 3000, 0);
+        assertEq(vault.tickLower(), -3000);
+        assertEq(vault.tickUpper(), 3000);
+    }
+
+    // ---------------------------------------------------------------
     // P0 #1 — totalAssets() includes pendingProceeds (asset currency).
     // ---------------------------------------------------------------
     function test_totalAssets_includesPendingProceedsInAssetCurrency() public {
-        MockReserveHook mh = new MockReserveHook();
+        MockReserveHook mh = sharedReserveHook;
         vault.setReserveHook(address(mh));
 
         // Pre-state: vault owns no token1, no liquidity. totalAssets = 0.
@@ -362,7 +447,7 @@ contract LiquidityVaultV2Test is Test {
     // P0 #1 — entry path auto-claims proceeds before share math.
     // ---------------------------------------------------------------
     function test_deposit_autoClaimsProceedsFromHook() public {
-        MockReserveHook mh = new MockReserveHook();
+        MockReserveHook mh = sharedReserveHook;
         vault.setReserveHook(address(mh));
 
         // Stage proceeds in BOTH currencies.
@@ -395,7 +480,7 @@ contract LiquidityVaultV2Test is Test {
     // P1 #B1 — rebalanceOffer is atomic: cancel → claim both → repost.
     // ---------------------------------------------------------------
     function test_rebalanceOffer_atomicCancelClaimRepost() public {
-        MockReserveHook mh = new MockReserveHook();
+        MockReserveHook mh = sharedReserveHook;
         vault.setReserveHook(address(mh));
 
         // Pre-stage: an active offer of 1 WETH already escrowed in the hook,
@@ -458,7 +543,7 @@ contract LiquidityVaultV2Test is Test {
     // idle balance and lives at the hook (escrowed or as pending proceeds)."
     // ---------------------------------------------------------------
     function test_totalAssets_continuousAcrossOfferLifecycle() public {
-        MockReserveHook mh = new MockReserveHook();
+        MockReserveHook mh = sharedReserveHook;
         vault.setReserveHook(address(mh));
 
         // Seed: 1.0 USDC of vault inventory parked idle.
@@ -501,7 +586,7 @@ contract LiquidityVaultV2Test is Test {
     }
 
     function test_totalAssets_continuousAcrossOfferCancel() public {
-        MockReserveHook mh = new MockReserveHook();
+        MockReserveHook mh = sharedReserveHook;
         vault.setReserveHook(address(mh));
 
         uint256 SEED = 1_000_000;
@@ -559,7 +644,7 @@ contract LiquidityVaultV2Test is Test {
     //             active (offerActive view returns false).
     // ---------------------------------------------------------------
     function test_rebalanceOffer_skipsCancelWhenNoActiveOffer() public {
-        MockReserveHook mh = new MockReserveHook();
+        MockReserveHook mh = sharedReserveHook;
         vault.setReserveHook(address(mh));
 
         // No prior offer — hasActiveOffer remains false.
@@ -581,7 +666,7 @@ contract LiquidityVaultV2Test is Test {
     //             treated as "no offer".
     // ---------------------------------------------------------------
     function test_rebalanceOffer_revertsOnRealCancelFailure() public {
-        MockReserveHook mh = new MockReserveHook();
+        MockReserveHook mh = sharedReserveHook;
         vault.setReserveHook(address(mh));
 
         // Post a real offer so offerActive == true.

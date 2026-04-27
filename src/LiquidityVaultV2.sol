@@ -609,7 +609,15 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolKey.toId());
         uint160 sqrtLower = TickMath.getSqrtPriceAtTick(tickLower);
         uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(tickUpper);
-        require(sqrtPriceX96 >= sqrtLower && sqrtPriceX96 < sqrtUpper, "RANGE_NOT_ACTIVE");
+        // Out-of-range: refuse to mint LP. Soft-fail when the caller did not
+        // require a minimum (e.g. plain `deposit()` / `mint()` paths) so the
+        // vault can hold idle inventory until the price re-enters range.
+        // Strict callers (depositWithZap, rebalance) pass minLiquidity > 0
+        // and still revert here.
+        if (sqrtPriceX96 < sqrtLower || sqrtPriceX96 >= sqrtUpper) {
+            require(minLiquidity == 0, "RANGE_NOT_ACTIVE");
+            return 0;
+        }
 
         address token0 = Currency.unwrap(poolKey.currency0);
         address token1 = Currency.unwrap(poolKey.currency1);
@@ -799,7 +807,7 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
 
     function rebalance(int24 newTickLower, int24 newTickUpper, uint256 minLiquidity) external onlyOwner nonReentrant {
         require(_poolKeySet, "POOL_KEY_NOT_SET");
-        require(newTickLower < newTickUpper, "INVALID_TICKS");
+        _validateTicks(newTickLower, newTickUpper);
         _collectYield();
         if (totalLiquidityDeployed > 0 && positionTokenId != 0) {
             _removeLiquidity(1e18);
@@ -818,13 +826,19 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     function setInitialTicks(int24 newTickLower, int24 newTickUpper) external onlyOwner {
         require(_poolKeySet, "POOL_KEY_NOT_SET");
         require(totalLiquidityDeployed == 0 && positionTokenId == 0, "POSITION_LIVE");
-        require(newTickLower < newTickUpper, "INVALID_TICKS");
-        int24 spacing = poolKey.tickSpacing;
-        require(newTickLower % spacing == 0 && newTickUpper % spacing == 0, "TICK_NOT_ALIGNED");
-        require(newTickLower >= TickMath.MIN_TICK && newTickUpper <= TickMath.MAX_TICK, "TICK_OUT_OF_BOUNDS");
+        _validateTicks(newTickLower, newTickUpper);
         tickLower = newTickLower;
         tickUpper = newTickUpper;
         emit Rebalanced(newTickLower, newTickUpper);
+    }
+
+    /// @dev Shared tick validation: ordering, spacing alignment, and TickMath bounds.
+    ///      Caller must have already confirmed `_poolKeySet`.
+    function _validateTicks(int24 lower, int24 upper) internal view {
+        require(lower < upper, "INVALID_TICKS");
+        int24 spacing = poolKey.tickSpacing;
+        require(lower % spacing == 0 && upper % spacing == 0, "TICK_NOT_ALIGNED");
+        require(lower >= TickMath.MIN_TICK && upper <= TickMath.MAX_TICK, "TICK_OUT_OF_BOUNDS");
     }
 
     function setZapRouter(address newRouter) external onlyOwner {
@@ -836,6 +850,10 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     /// @notice Bind the reserve-sale hook (must equal poolKey.hooks for offers to fire).
     function setReserveHook(address newHook) external onlyOwner {
         require(newHook == address(0) || newHook.code.length > 0, "NOT_CONTRACT");
+        if (newHook != address(0)) {
+            require(_poolKeySet, "POOL_KEY_NOT_SET");
+            require(newHook == address(poolKey.hooks), "HOOK_MISMATCH");
+        }
         emit ReserveHookUpdated(reserveHook, newHook);
         reserveHook = newHook;
     }

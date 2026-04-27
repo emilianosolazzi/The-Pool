@@ -3,12 +3,13 @@
 import { useMemo, useState } from 'react';
 import {
   useAccount,
+  useChainId,
   useReadContract,
   useReadContracts,
   useWaitForTransactionReceipt,
   useWriteContract,
 } from 'wagmi';
-import { arbitrumSepolia } from 'wagmi/chains';
+import { arbitrum, arbitrumSepolia } from 'wagmi/chains';
 import { erc20Abi, vaultAbi } from '@/lib/abis';
 import { fmtUnits } from '@/lib/format';
 import { type Deployment } from '@/lib/deployments';
@@ -21,6 +22,8 @@ const BPS_DENOMINATOR = 10_000n;
 
 export function VaultCard({ deployment, chainId }: { deployment: Deployment; chainId: number }) {
   const { address } = useAccount();
+  const connectedChainId = useChainId();
+  const onCorrectChain = address ? connectedChainId === chainId : true;
   const [tab, setTab] = useState<Tab>('deposit');
   const [amount, setAmount] = useState('');
 
@@ -114,23 +117,25 @@ export function VaultCard({ deployment, chainId }: { deployment: Deployment; cha
   }
 
   const onApprove = () => {
-    if (!asset || !vault) return;
+    if (!asset || !vault || !onCorrectChain) return;
     writeContract({
       address: asset,
       abi: erc20Abi,
       functionName: 'approve',
       args: [vault, maxUint256],
+      chainId,
     });
   };
 
   const onSubmit = () => {
-    if (!vault || !address || parsed <= 0n) return;
+    if (!vault || !address || parsed <= 0n || !onCorrectChain) return;
     if (tab === 'deposit') {
       writeContract({
         address: vault,
         abi: vaultAbi,
         functionName: 'deposit',
         args: [parsed, address],
+        chainId,
       });
     } else {
       writeContract({
@@ -138,6 +143,7 @@ export function VaultCard({ deployment, chainId }: { deployment: Deployment; cha
         abi: vaultAbi,
         functionName: 'redeem',
         args: [parsed, address, address],
+        chainId,
       });
     }
   };
@@ -153,6 +159,7 @@ export function VaultCard({ deployment, chainId }: { deployment: Deployment; cha
   const disabled =
     !ready ||
     !address ||
+    !onCorrectChain ||
     parsed <= 0n ||
     isPending ||
     isMining ||
@@ -160,6 +167,13 @@ export function VaultCard({ deployment, chainId }: { deployment: Deployment; cha
     (tab === 'deposit' && assetBalance !== undefined && parsed > assetBalance) ||
     (tab === 'withdraw' && shares !== undefined && parsed > shares) ||
     exceedsConservativeWithdraw;
+
+  const expectedChainName =
+    chainId === arbitrum.id
+      ? 'Arbitrum One'
+      : chainId === arbitrumSepolia.id
+        ? 'Arbitrum Sepolia'
+        : `chain ${chainId}`;
 
   return (
     <div className="card shadow-glow">
@@ -249,8 +263,12 @@ export function VaultCard({ deployment, chainId }: { deployment: Deployment; cha
             <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-3 text-center text-sm text-zinc-400">
               Connect a wallet to {tab}.
             </div>
+          ) : !onCorrectChain ? (
+            <div className="rounded-lg border border-amber-400/30 bg-amber-500/5 px-3 py-3 text-center text-sm text-amber-200">
+              Switch to {expectedChainName} to {tab}.
+            </div>
           ) : needsApproval ? (
-            <button onClick={onApprove} disabled={isPending || isMining} className="btn-primary w-full">
+            <button onClick={onApprove} disabled={isPending || isMining || !onCorrectChain} className="btn-primary w-full">
               {isPending || isMining ? 'Approving…' : `Approve ${deployment.assetSymbol}`}
             </button>
           ) : (

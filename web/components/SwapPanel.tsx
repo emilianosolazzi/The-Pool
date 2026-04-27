@@ -142,14 +142,21 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
   const inputIsCurrency1 = lc(inputToken) === lc(poolKey.currency1);
   const zeroForOne = inputIsCurrency0;
 
-  // Guardrail: if the selected swap tokens are not BOTH part of the pool, the
-  // user is looking at a stale or misconfigured deployment. Surface as a plan
-  // error so the swap button stays disabled with a clear reason.
+  // Guardrail: if the selected swap tokens are not BOTH part of the pool, or
+  // both sides resolve to the same currency, the user is looking at a stale or
+  // misconfigured deployment. Surface as a plan error so the swap button stays
+  // disabled with a clear reason.
+  const outputIsCurrency0 = lc(outputToken) === lc(poolKey.currency0);
+  const outputIsCurrency1 = lc(outputToken) === lc(poolKey.currency1);
   const currencyMismatch =
     liveKeyValid &&
     inputToken !== ZERO &&
     outputToken !== ZERO &&
-    !(inputIsCurrency0 || inputIsCurrency1);
+    (
+      !(inputIsCurrency0 || inputIsCurrency1) ||
+      !(outputIsCurrency0 || outputIsCurrency1) ||
+      lc(inputToken) === lc(outputToken)
+    );
 
   const amountIn = useMemo(() => {
     if (!amount) return 0n;
@@ -189,7 +196,9 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
   const lifetimeYield = vaultStats?.[4]; // yieldColl
 
   // ── Quote ─────────────────────────────────────────────────────────────────
-  const quoteEnabled = supported && amountIn > 0n;
+  // Only quote when both swap tokens are confirmed to live in the on-chain
+  // PoolKey. Quoting against a stale fallback key produces misleading numbers.
+  const quoteEnabled = supported && amountIn > 0n && liveKeyValid && !currencyMismatch;
   const { data: quoteSim, error: quoteErr } = useSimulateContract({
     address: infra?.v4Quoter,
     abi: v4QuoterAbi,
@@ -337,8 +346,11 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
   const liqDeployed = vaultStats?.[3] ?? 0n;
   const poolSeeded = liqDeployed > 1_000_000_000n; // info-only threshold
 
+  const noWallet = !address;
   const swapDisabled =
+    noWallet ||
     !supported ||
+    !liveKeyValid ||
     currencyMismatch ||
     amountIn === 0n ||
     !amountOut ||
@@ -559,8 +571,13 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
         <div className="mt-5">
           <button
             type="button"
-            onClick={txAction.onClick}
-            disabled={swapDisabled && !needsErc20Approve && !needsPermit2Approve}
+            onClick={noWallet ? undefined : txAction.onClick}
+            disabled={
+              noWallet ||
+              isPending ||
+              isMining ||
+              (swapDisabled && !needsErc20Approve && !needsPermit2Approve)
+            }
             className="btn-primary w-full justify-center disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isPending || isMining
@@ -569,9 +586,9 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
                 : step === 'approvePermit2'
                   ? 'Setting Permit2…'
                   : 'Swapping…'
-              : address
-                ? txAction.label
-                : 'Connect wallet'}
+              : noWallet
+                ? 'Connect wallet'
+                : txAction.label}
           </button>
           {txHash ? (
             <a
