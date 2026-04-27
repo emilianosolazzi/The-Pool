@@ -29,7 +29,7 @@ companion.
 |----------|---------------|-------|
 | [`DynamicFeeHookV2`](../src/DynamicFeeHookV2.sol) | salt-mined hook (must encode `BEFORE_SWAP_FLAG | AFTER_SWAP_FLAG | BEFORE_SWAP_RETURNS_DELTA_FLAG | AFTER_SWAP_RETURNS_DELTA_FLAG`) | `Ownable2Step`. Owner can register vaults, ack failed distributions, set `maxFeeBps`. |
 | [`LiquidityVaultV2`](../src/LiquidityVaultV2.sol) | EOA-deployable | `Ownable2Step` + `Pausable` + `ReentrancyGuard`. Owner can pause, set pool key (one-shot), set NAV anchor, set TVL cap, rescue native ETH. |
-| [`FeeDistributor`](../src/FeeDistributor.sol) | EOA-deployable | `Ownable`. Owner can `retryDistribute`, `sweepUndistributed`, set hook/treasury. |
+| [`FeeDistributor`](../src/FeeDistributor.sol) | EOA-deployable | `Ownable2Step`. Owner can `retryDistribute`, `sweepUndistributed`, set hook/treasury. |
 
 ### Trust assumptions
 
@@ -118,7 +118,9 @@ companion.
 2. Deploy `FeeDistributor(poolManager, treasury, hook=address(0))`.
 3. Deploy `DynamicFeeHookV2(poolManager, distributor, owner)` at the
    mined salt.
-4. `distributor.setHook(hook)`. Hook is single-set.
+4. `distributor.setHook(hook)`. Treat as immutable operationally after
+   launch; the setter is owner-callable but should not be rotated
+   without documented justification.
 5. Deploy `LiquidityVaultV2(...)`. **Do not unpause yet.**
 6. `vault.setPoolKey(...)`. One-shot.
 7. `hook.registerVault(poolKey, vault)`. One-shot per pool.
@@ -144,11 +146,16 @@ distributor not configured, etc.).
 
 1. Identify and fix the distributor failure (`setTreasury`,
    `setPoolKey`, `setHook`, top up state as required).
-2. Move the stuck balance from hook → distributor → recipients via
-   `distributor.retryDistribute(currency, amount)` (uses live balance).
-   Or, if the hook still holds the balance, route through
-   `acknowledgeFailedDistribution` after manually transferring funds.
-3. Once the funds have left the hook, call
+2. If the failed fee was already transferred to the distributor before
+   `distribute()` reverted, call
+   `distributor.retryDistribute(currency, amount)` after fixing the
+   config — it replays against the distributor's live balance.
+   If funds remain at the hook (the common case: the hook's try/catch
+   keeps them in `failedDistribution`), perform the manual recovery
+   path: transfer the amount from the hook to the distributor via a
+   direct ERC-20 transfer from the owner's safe, then call
+   `distributor.retryDistribute(currency, amount)`.
+3. Once the funds have been reconciled and left the hook, call
    `hook.acknowledgeFailedDistribution(currency, amount)` to zero out
    the on-chain tally. Emits `FailedDistributionAcknowledged`.
 4. As a last resort, `distributor.sweepUndistributed(currency, to,
@@ -168,7 +175,7 @@ path; do not attempt to convert dust into shares.
 
 #### NAV anchor drift / deviation guard tripping
 
-**Symptom:** Deposits or withdraws revert with `NavDeviationExceeded`.
+**Symptom:** Deposits or withdraws revert with `NAV_PRICE_DEVIATION`.
 
 **Diagnosis.** Pool spot has moved more than `maxNavDeviationBps`
 (default ≤ 500 bps = 5%) from `navReferenceSqrtPriceX96`. This is the
