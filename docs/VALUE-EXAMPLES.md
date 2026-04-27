@@ -64,7 +64,7 @@ Assume:
 - Not volatile (base fee path)
 - `treasuryShare = 20`
 - Vault active-liquidity share `phi = 1%`
-- Pool fee tier example = 0.01% (100 fee units)
+- Pool fee tier example = 0.05% (500 fee units, matches deployed pool)
 
 Math:
 
@@ -73,9 +73,9 @@ hookFee        = 100,000 * 0.25% = 250
 treasuryAmount = 250 * 20% = 50
 lpDonation     = 200
 
-poolFeeAmount  = 100,000 * 0.01% = 10
+poolFeeAmount  = 100,000 * 0.05% = 50
 
-vaultGross     ~= 1% * 200 + 1% * 10 = 2.10
+vaultGross     ~= 1% * 200 + 1% * 50 = 2.50
 ```
 
 If volatile path is active:
@@ -84,7 +84,7 @@ If volatile path is active:
 hookFee        = 250 * 1.5 = 375   (subject to maxFeeBps cap)
 treasuryAmount = 75
 lpDonation     = 300
-vaultGross     ~= 1% * 300 + 1% * 10 = 3.10
+vaultGross     ~= 1% * 300 + 1% * 50 = 3.50
 ```
 
 ## 5) Daily Example (Assumptions Explicit)
@@ -93,7 +93,7 @@ Assume:
 - Daily volume `V = $1,000,000,000`
 - Volatility-hit probability `p = 20%`
 - Expected hook fee bps = `25 * (1 + 0.5*p) = 27.5 bps`
-- Pool fee tier = 0.01% (1 bps)
+- Pool fee tier = 0.05% (5 bps, matches deployed pool)
 - `treasuryShare = 20%`
 - Vault in-range share `phi = 1%`
 - `performanceFeeBps = 400` (4%)
@@ -104,14 +104,14 @@ Step-by-step:
 ```
 hookFeesDaily      = V * 0.275% = 2,750,000
 lpDonationDaily    = 2,750,000 * 80% = 2,200,000
-poolFeesDaily      = V * 0.01% = 100,000
+poolFeesDaily      = V * 0.05% = 500,000
 
 vaultGrossDaily    ~= phi * (lpDonationDaily + poolFeesDaily)
-				  ~= 1% * (2,200,000 + 100,000)
-				  = 23,000
+				  ~= 1% * (2,200,000 + 500,000)
+				  = 27,000
 
-vaultNetDaily      = 23,000 * (1 - 4%) = 22,080
-dailyYieldRate     = 22,080 / 10,000,000 = 0.2208%
+vaultNetDaily      = 27,000 * (1 - 4%) = 25,920
+dailyYieldRate     = 25,920 / 10,000,000 = 0.2592%
 ```
 
 ## 6) APR vs APY (matches contract semantics)
@@ -122,16 +122,16 @@ dailyYieldRate     = 22,080 / 10,000,000 = 0.2208%
 aprBps = (recentYield * 365 days / windowSeconds) * 10_000 / totalAssets
 ```
 
-Using the daily example above (`dailyYieldRate = 0.2208%`):
+Using the daily example above (`dailyYieldRate = 0.2592%`):
 
 ```
-APR (linear) = 0.2208% * 365 = 80.59%
+APR (linear) = 0.2592% * 365 = 94.6%
 ```
 
 If you choose to model external daily compounding, APY would be:
 
 ```
-APY = (1 + 0.002208)^365 - 1 ~= 123.7%
+APY = (1 + 0.002592)^365 - 1 ~= 158.0%
 ```
 
 This compounding APY is an analytical projection, not what `getProjectedAPY` returns.
