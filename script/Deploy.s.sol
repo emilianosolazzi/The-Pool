@@ -102,11 +102,17 @@ contract Deploy is Script {
         // EOA directly. HookMiner must use the factory address so the computed
         // hook address matches what actually gets deployed on-chain.
         address create2Factory = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
+        // Owner of the hook MUST be the broadcasting EOA. Passing it explicitly
+        // avoids the historical bug where Ownable(msg.sender) inside the
+        // constructor resolved to the CREATE2 factory and locked the hook
+        // permanently. Step 7 (timelock handoff) transfers ownership uniformly
+        // from the deployer EOA to the timelock for distributor/vault/hook.
+        address hookOwner = deployerAddr;
         (address hookAddr, bytes32 salt) = HookMiner.find(
             create2Factory,
             flags,
             type(DynamicFeeHook).creationCode,
-            abi.encode(address(poolManager), expectedDistributor)
+            abi.encode(address(poolManager), expectedDistributor, hookOwner)
         );
 
         vm.startBroadcast();
@@ -136,8 +142,9 @@ contract Deploy is Script {
         console2.log("LiquidityVault deployed:", address(vault));
 
         // ── 3. DynamicFeeHook (CREATE2 — address encodes hook permission flags) ─
-        DynamicFeeHook hook = new DynamicFeeHook{salt: salt}(poolManager, address(distributor));
+        DynamicFeeHook hook = new DynamicFeeHook{salt: salt}(poolManager, address(distributor), hookOwner);
         require(address(hook) == hookAddr, "Hook address mismatch -- salt stale");
+        require(hook.owner() == hookOwner, "Hook owner mismatch -- ownership lock guard");
 
         if (maxFeeBps != 50) hook.setMaxFeeBps(maxFeeBps); // only emit event if non-default
         console2.log("DynamicFeeHook deployed:", address(hook));

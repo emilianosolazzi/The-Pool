@@ -26,12 +26,14 @@ import {BootstrapRewards} from "../src/BootstrapRewards.sol";
 /// Required env vars (all already present in .env):
 ///   POOL_MANAGER, POS_MANAGER, TOKEN0, TOKEN1, ASSET_TOKEN, TREASURY, PERMIT2
 ///
-/// Optional env vars (sane defaults):
-///   POOL_FEE          (default 500    = 0.05% — must differ from the existing pool key)
-///   TICK_SPACING      (default 60     — must differ from the existing pool key (10))
-///   INIT_TICK         (default -198060 ≈ ETH at $2,500, multiple of 60)
-///   HOOK_ADDR         (default 0x62076C1Cb0Ea57Acd2353fF45226a1FB1e6100c4 — current hook)
-///   BOOTSTRAP_PROGRAM_START (default block.timestamp)
+/// Optional env vars (sane defaults). NB: deliberately use REDEPLOY_-prefixed
+/// names so the existing .env (POOL_FEE=500, TICK_SPACING=10 — the broken pool's
+/// own key) does not get inherited and collide with a PoolAlreadyInitialized revert.
+///   REDEPLOY_POOL_FEE      (default 500    = 0.05%)
+///   REDEPLOY_TICK_SPACING  (default 60 — MUST differ from the broken pool's tickSpacing 10)
+///   REDEPLOY_INIT_TICK     (default -198060 ≈ ETH at $2,500, multiple of 60)
+///   REDEPLOY_HOOK_ADDR     (default 0x62076C1Cb0Ea57Acd2353fF45226a1FB1e6100c4 — current hook)
+///   REDEPLOY_PROGRAM_START (default block.timestamp)
 ///
 /// Run:
 ///   forge script script/RedeployNonHook.s.sol:RedeployNonHook \
@@ -69,10 +71,16 @@ contract RedeployNonHook is Script {
             "ASSET_TOKEN must equal TOKEN0 or TOKEN1"
         );
 
-        uint24  poolFee     = uint24(vm.envOr("POOL_FEE",     uint256(500)));
-        int24   tickSpacing = int24(vm.envOr("TICK_SPACING",  int256(60)));
-        int24   initTick    = int24(vm.envOr("INIT_TICK",     int256(-198060)));
-        address hookAddr    = vm.envOr("HOOK_ADDR", address(0x62076C1Cb0Ea57Acd2353fF45226a1FB1e6100c4));
+        uint24  poolFee     = uint24(vm.envOr("REDEPLOY_POOL_FEE",     uint256(500)));
+        int24   tickSpacing = int24(vm.envOr("REDEPLOY_TICK_SPACING",  int256(60)));
+        int24   initTick    = int24(vm.envOr("REDEPLOY_INIT_TICK",     int256(-198060)));
+        address hookAddr    = vm.envOr("REDEPLOY_HOOK_ADDR", address(0x62076C1Cb0Ea57Acd2353fF45226a1FB1e6100c4));
+
+        // Defence-in-depth: if .env still leaks a stale TICK_SPACING=10, the
+        // resulting PoolKey would equal the broken pool and PoolManager.initialize
+        // reverts with PoolAlreadyInitialized (0x7983c051). 60 is the canonical v4
+        // tickSpacing for fee=500 and what the frontend expects.
+        require(tickSpacing != 10, "REDEPLOY_TICK_SPACING must differ from the broken pool (10)");
 
         // initTick must be a multiple of tickSpacing or PoolManager will revert.
         require(initTick % tickSpacing == 0, "INIT_TICK not multiple of TICK_SPACING");
@@ -81,7 +89,7 @@ contract RedeployNonHook is Script {
         IPositionManager posManager  = IPositionManager(posManagerAddr);
 
         uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(initTick);
-        uint64 programStart = uint64(vm.envOr("BOOTSTRAP_PROGRAM_START", uint256(block.timestamp)));
+        uint64 programStart = uint64(vm.envOr("REDEPLOY_PROGRAM_START", uint256(block.timestamp)));
 
         // ── Sanity log before broadcasting ──────────────────────────────────
         console2.log("=== Inputs ===");
@@ -156,9 +164,19 @@ contract RedeployNonHook is Script {
         distributor.setPoolKey(key);
         vault.setPoolKey(key);
 
-        // ── 7. Repoint the EXISTING hook at the new distributor ─────────────
-        // Owner-only call — caller (deployer) must equal hook.owner().
-        IDynamicFeeHookLike(hookAddr).setFeeDistributor(address(distributor));
+        // ── 7. Hook repoint INTENTIONALLY OMITTED ──────────────────────────
+        // The deployed DynamicFeeHook at REDEPLOY_HOOK_ADDR was created via
+        // CREATE2 from Arachnid's deterministic deployer, so the hook's
+        // Ownable(msg.sender) recorded the FACTORY (0x4e59…56C) as owner.
+        // setFeeDistributor is therefore permanently uncallable — confirmed
+        // on-chain via `cast call <hook> owner()`.
+        //
+        // Consequence: the existing hook will continue to route afterSwap
+        // fee deltas to the OLD FeeDistributor (0x474F…26C3), which is in
+        // turn pinned to the OLD broken pool. Hook-distributed fees on the
+        // new pool will therefore leak to the dead pool until a new hook is
+        // deployed in a follow-up. This is a known wart, NOT a swap blocker:
+        // the new pool's standard v4 swap-fee accrual works independently.
 
         vm.stopBroadcast();
 
@@ -169,8 +187,4 @@ contract RedeployNonHook is Script {
         console2.log("tickSpacing =", int256(tickSpacing));
         console2.log("poolFee     =", uint256(poolFee));
     }
-}
-
-interface IDynamicFeeHookLike {
-    function setFeeDistributor(address newDistributor) external;
 }

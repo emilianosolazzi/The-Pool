@@ -52,10 +52,10 @@ contract IntegrationTest is Test, Deployers {
             address(this),
             flags,
             type(DynamicFeeHook).creationCode,
-            abi.encode(address(manager), address(distributor))
+            abi.encode(address(manager), address(distributor), address(this))
         );
 
-        hook = new DynamicFeeHook{salt: salt}(manager, address(distributor));
+        hook = new DynamicFeeHook{salt: salt}(manager, address(distributor), address(this));
         require(address(hook) == hookAddr, "hook addr mismatch");
 
         // Resolve the circular dependency: now tell the distributor about the hook.

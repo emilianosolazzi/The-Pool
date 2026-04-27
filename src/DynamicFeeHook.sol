@@ -56,7 +56,17 @@ contract DynamicFeeHook is BaseHook, Ownable2Step {
     event DistributorUpdated(address indexed old, address indexed newDistributor);
     event MaxFeeBpsUpdated(uint256 oldBps, uint256 newBps);
 
-    constructor(IPoolManager _poolManager, address _distributor) BaseHook(_poolManager) Ownable(msg.sender) {
+    /// @param _poolManager Uniswap v4 PoolManager
+    /// @param _distributor FeeDistributor that will receive routed fees
+    /// @param _owner Initial owner (cannot be address(0)). MUST be passed
+    ///        explicitly because this contract is deployed via CREATE2 through
+    ///        the Arachnid factory; using `msg.sender` here would lock the
+    ///        owner to the factory address (irrecoverable).
+    constructor(IPoolManager _poolManager, address _distributor, address _owner)
+        BaseHook(_poolManager)
+        Ownable(_owner)
+    {
+        require(_owner != address(0), "OWNER_ZERO");
         feeDistributor = IFeeDistributor(_distributor);
     }
 

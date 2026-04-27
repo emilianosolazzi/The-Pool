@@ -45,10 +45,10 @@ contract DynamicFeeHookTest is Test {
             address(this),
             flags,
             type(DynamicFeeHook).creationCode,
-            abi.encode(address(mockManager), address(mockDistributor))
+            abi.encode(address(mockManager), address(mockDistributor), address(this))
         );
 
-        hook = new DynamicFeeHook{salt: salt}(IPoolManager(address(mockManager)), address(mockDistributor));
+        hook = new DynamicFeeHook{salt: salt}(IPoolManager(address(mockManager)), address(mockDistributor), address(this));
         assertEq(address(hook), hookAddr);
 
         poolKey = PoolKey({

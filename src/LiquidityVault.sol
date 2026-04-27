@@ -30,14 +30,18 @@ contract LiquidityVault is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
 
     uint256 public constant MIN_DEPOSIT = 1e6;
 
-    // Default range for USDC-deposit vault on WETH/USDC (Arbitrum One).
-    // WETH = currency0, USDC = currency1 (by address sort), so vault asset is token1.
-    // Single-sided token1 requires currentTick > tickUpper; as ETH drops below
-    // the range, the vault slowly converts USDC -> WETH while earning fees.
-    //   tickUpper = -201360 ~ 1 WETH ~= 1,800 USDC
-    //   tickLower = -210780 ~ 1 WETH ~=   700 USDC
-    // Both values are multiples of 10 and 60 so they align with common v4 tick
-    // spacings (fee tiers 500 / 3000). Owner may call rebalance() at any time.
+    // Default range for the USDC-deposit vault on Arbitrum WETH/USDC.
+    // WETH = currency0, USDC = currency1 (by address sort), so vault asset is
+    // token1 and the position is single-sided in USDC while the live tick is
+    // ABOVE tickUpper. As ETH falls into the range the vault converts USDC
+    // -> WETH; while above, the vault earns swap fees in USDC.
+    //
+    //   tickLower = -210780  (multiple of 60)  ~ ETH ~=   717 USDC
+    //   tickUpper = -201360  (multiple of 60)  ~ ETH ~= 1,838 USDC
+    //
+    // Pool tickSpacing is 60 in the live deployment (poolFee=500). Owner may
+    // call rebalance(newLower, newUpper) at any time; both ticks must be
+    // multiples of the pool's tickSpacing or PositionManager will revert.
     int24 public tickLower = -210780;
     int24 public tickUpper = -201360;
 
@@ -545,7 +549,13 @@ contract LiquidityVault is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         depositors = totalDepositors;
         liqDeployed = assetsDeployed;
         yieldColl = totalYieldCollected;
-        feeDesc = "0.25% Hook Fee (20% Treasury / 80% LP Bonus) + Base Pool Fee";
+        // Static UI hint. Authoritative values live on-chain:
+        //   DynamicFeeHook.HOOK_FEE_BPS         (currently 25 = 0.25%)
+        //   FeeDistributor.treasuryShare        (mutable, default 20 of 100)
+        //   FeeDistributor.lpShare()            (= 100 - treasuryShare)
+        //   pool fee tier                       (PoolKey.fee, currently 500 = 0.05%)
+        // UIs that need exact values must read those getters directly.
+        feeDesc = "Hook fee + base pool fee. Read on-chain: DynamicFeeHook.HOOK_FEE_BPS, FeeDistributor.treasuryShare, PoolKey.fee";
     }
 
     function getProjectedAPY(uint256 recentYield, uint256 windowSeconds) external view returns (uint256 aprBps) {
