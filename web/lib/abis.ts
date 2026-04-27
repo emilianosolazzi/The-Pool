@@ -89,3 +89,52 @@ export const poolManagerAbi = [
     outputs: [{ name: 'feeGrowthGlobal1X128', type: 'uint256' }],
   },
 ] as const satisfies Abi;
+
+// BootstrapRewards — surfaces epoch bonus pool, schedule, payout asset
+export const bootstrapAbi = [
+  { type: 'function', name: 'payoutAsset', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+  { type: 'function', name: 'realTreasury', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+  { type: 'function', name: 'programStart', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint64' }] },
+  { type: 'function', name: 'epochLength', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint64' }] },
+  { type: 'function', name: 'epochCount', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint32' }] },
+  { type: 'function', name: 'bonusShareBps', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint16' }] },
+  { type: 'function', name: 'perEpochCap', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'perWalletShareCap', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'programEnd', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'currentEpoch', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  {
+    type: 'function',
+    name: 'epochBounds',
+    stateMutability: 'view',
+    inputs: [{ name: 'epoch', type: 'uint256' }],
+    outputs: [
+      { name: 'start', type: 'uint256' },
+      { name: 'end', type: 'uint256' },
+    ],
+  },
+  {
+    type: 'function',
+    name: 'epochs',
+    stateMutability: 'view',
+    inputs: [{ type: 'uint256' }],
+    outputs: [
+      { name: 'bonusPool', type: 'uint128' },
+      { name: 'claimedAmount', type: 'uint128' },
+      { name: 'totalShareSeconds', type: 'uint256' },
+      { name: 'swept', type: 'bool' },
+    ],
+  },
+  { type: 'function', name: 'isEpochFinalized', stateMutability: 'view', inputs: [{ type: 'uint256' }], outputs: [{ type: 'bool' }] },
+  { type: 'function', name: 'isClaimWindowOpen', stateMutability: 'view', inputs: [{ type: 'uint256' }], outputs: [{ type: 'bool' }] },
+  { type: 'function', name: 'eligibleSharesOf', stateMutability: 'view', inputs: [{ type: 'address' }], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'claimed', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'uint256' }], outputs: [{ type: 'bool' }] },
+  { type: 'function', name: 'pullInflow', stateMutability: 'nonpayable', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'poke', stateMutability: 'nonpayable', inputs: [{ type: 'address' }], outputs: [] },
+  {
+    type: 'function',
+    name: 'claim',
+    stateMutability: 'nonpayable',
+    inputs: [{ type: 'uint256' }],
+    outputs: [{ type: 'uint256' }],
+  },
+] as const satisfies Abi;

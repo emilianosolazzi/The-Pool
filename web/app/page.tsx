@@ -7,6 +7,7 @@ import { Hero } from '@/components/Hero';
 import { PlainEnglish } from '@/components/PlainEnglish';
 import { StatsGrid } from '@/components/StatsGrid';
 import { VaultCard } from '@/components/VaultCard';
+import { BootstrapPanel } from '@/components/BootstrapPanel';
 import { HowItWorks } from '@/components/HowItWorks';
 import { Footer } from '@/components/Footer';
 import { DEFAULT_CHAIN_ID, getDeployment, type AppChainId } from '@/lib/deployments';
@@ -18,6 +19,10 @@ export default function HomePage() {
       ? chainId
       : DEFAULT_CHAIN_ID;
   const deployment = getDeployment(activeChainId);
+  const explorerBase =
+    activeChainId === arbitrumSepolia.id
+      ? 'https://sepolia.arbiscan.io'
+      : 'https://arbiscan.io';
 
   return (
     <>
@@ -46,6 +51,12 @@ export default function HomePage() {
             <VaultCard deployment={deployment} chainId={activeChainId} />
           </div>
         </section>
+
+        <BootstrapPanel
+          deployment={deployment}
+          chainId={activeChainId}
+          explorerBase={explorerBase}
+        />
 
         <HowItWorks deployment={deployment} chainId={activeChainId} />
       </main>
