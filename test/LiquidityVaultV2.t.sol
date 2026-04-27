@@ -789,13 +789,14 @@ contract LiquidityVaultV2Test is Test {
 
     function test_nav_oorClamp_doesNotOverquoteOtherToken() public {
         _bootstrapNavRef();
-        // Open the deviation cap so we can push the pool well out of range
-        // without tripping the guard. The clamp is what we're verifying here,
-        // not the deviation gate.
-        vault.setMaxNavDeviationBps(2000);
         // Push spot ABOVE sqrtUpper. Default range is [-199020, -198840];
         // jumping to tick -198000 puts spot well above sqrtUpper.
         _setPoolTick(-198000);
+        // Re-anchor so the deviation gate doesn't fire — we're isolating
+        // the clamp behaviour of totalAssets() here, not the deviation gate.
+        // (Cannot widen the tolerance high enough to bypass: cap is 500 bps
+        // = 5%, well below this ~9% move.)
+        vault.refreshNavReference();
 
         // Mint a large slug of WETH directly to the vault as idle other-token.
         uint256 wethAmount = 1 ether;
@@ -843,6 +844,105 @@ contract LiquidityVaultV2Test is Test {
         } else {
             assertLt(unclamped, expectedClamped, "OOR-up makes 1->0 quote shrink; clamp protects");
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Edge case 1: deviation math must not overflow at extreme sqrt prices.
+    // The full uint160 sqrt-price range squares to ~2^320; the implementation
+    // must keep all intermediate values inside uint256.
+    // ---------------------------------------------------------------
+    function test_nav_deviationMath_doesNotOverflowAtExtremeSqrt() public {
+        // Anchor at a near-MAX sqrt-price.
+        int24 highTick = 887220; // aligned to spacing-60; sqrt close to MAX_SQRT_PRICE
+        mockManager.setSlot0(TickMath.getSqrtPriceAtTick(highTick), highTick);
+        vault.refreshNavReference();
+        assertEq(vault.navReferenceSqrtPriceX96(), TickMath.getSqrtPriceAtTick(highTick));
+
+        // Move spot a few ticks (~few bps PRICE) and call totalAssets().
+        // Must not revert from arithmetic overflow. Deviation stays well
+        // inside the default 100 bps tolerance.
+        int24 highTick2 = 887200;
+        mockManager.setSlot0(TickMath.getSqrtPriceAtTick(highTick2), highTick2);
+        // No revert is the assertion; result value itself isn't meaningful.
+        vault.totalAssets();
+
+        // Same exercise at the symmetric low extreme.
+        int24 lowTick = -887220;
+        mockManager.setSlot0(TickMath.getSqrtPriceAtTick(lowTick), lowTick);
+        vault.refreshNavReference();
+        int24 lowTick2 = -887200;
+        mockManager.setSlot0(TickMath.getSqrtPriceAtTick(lowTick2), lowTick2);
+        vault.totalAssets();
+    }
+
+    // ---------------------------------------------------------------
+    // Edge case 2: lazy-bootstrap attack surface.
+    //
+    // The lazy bootstrap pins navReferenceSqrtPriceX96 to whatever the pool
+    // spot is when the FIRST state-changing call lands. If a manipulator can
+    // be the first depositor at a manipulated spot, every subsequent honest
+    // depositor at the true price will trip NAV_PRICE_DEVIATION until the
+    // owner re-anchors.
+    //
+    // Mitigation (verified in the second test below): the deployment script
+    // MUST call `refreshNavReference()` at the true price BEFORE any deposit
+    // (or before unpause if the vault is launched paused).
+    // ---------------------------------------------------------------
+    function test_nav_lazyBootstrap_anchorsAtFirstDepositPrice() public {
+        // Widen range so the manipulator's deposit doesn't fail the
+        // RANGE_NOT_ACTIVE check inside _deployBalancedLiquidity. This is
+        // realistic — the deviation guard is the layer being demonstrated.
+        vault.setInitialTicks(-199500, -198000);
+
+        // Manipulator pushes pool spot 400 ticks above true (-198900).
+        // Roughly +4% PRICE — well over the default 100 bps tolerance.
+        address attacker = makeAddr("attacker");
+        _setPoolTick(-198500);
+
+        // Attacker is the first depositor → bootstrap pins reference here.
+        usdc.mint(attacker, 100e6);
+        vm.startPrank(attacker);
+        usdc.approve(address(vault), type(uint256).max);
+        vault.deposit(100e6, attacker);
+        vm.stopPrank();
+        assertEq(
+            vault.navReferenceSqrtPriceX96(),
+            TickMath.getSqrtPriceAtTick(-198500),
+            "bootstrap anchored at manipulated price"
+        );
+
+        // Pool returns to the true price. Honest depositor now reverts.
+        _setPoolTick(-198900);
+        usdc.mint(alice, 100e6);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vm.expectRevert(LiquidityVaultV2.NAV_PRICE_DEVIATION.selector);
+        vault.deposit(100e6, alice);
+        vm.stopPrank();
+    }
+
+    function test_nav_ownerInitBeforeFirstDeposit_preventsBootstrapAttack() public {
+        // Deployment-style flow: pool already at the true price (-198900 from
+        // setUp). Owner calls refreshNavReference() BEFORE any deposit.
+        vault.setInitialTicks(-199500, -198000);
+        vault.refreshNavReference();
+        assertEq(
+            vault.navReferenceSqrtPriceX96(),
+            TickMath.getSqrtPriceAtTick(-198900),
+            "owner anchored reference at true price"
+        );
+
+        // Now the manipulator tries the same attack. They push spot, then
+        // attempt to be the first depositor — but the reference is already
+        // pinned, so their deposit at the manipulated spot reverts.
+        address attacker = makeAddr("attacker");
+        _setPoolTick(-198500);
+        usdc.mint(attacker, 100e6);
+        vm.startPrank(attacker);
+        usdc.approve(address(vault), type(uint256).max);
+        vm.expectRevert(LiquidityVaultV2.NAV_PRICE_DEVIATION.selector);
+        vault.deposit(100e6, attacker);
+        vm.stopPrank();
     }
 }
 

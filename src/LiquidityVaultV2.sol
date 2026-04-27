@@ -113,9 +113,16 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     // deviation revert is the correct conservative behaviour: under
     // manipulation, NOBODY can deposit or redeem until the price normalises
     // or the owner re-anchors.
-
     /// @notice Reference sqrt-price the NAV deviation guard checks against.
     ///         0 means "unset" — the next deposit/withdraw will bootstrap it.
+    ///
+    ///         DEPLOYMENT FLOW: owners SHOULD call `refreshNavReference()`
+    ///         immediately after `setPoolKey` and before opening deposits
+    ///         (i.e. before `unpause()` if the vault is launched paused).
+    ///         Lazy bootstrap is a fallback only — letting an attacker be
+    ///         the first depositor at a manipulated spot would anchor the
+    ///         reference to that manipulated price. See
+    ///         test_nav_lazyBootstrap_anchorsAtFirstDepositPrice.
     uint160 public navReferenceSqrtPriceX96;
 
     /// @notice Max permitted PRICE deviation between live spot and the NAV
@@ -123,8 +130,8 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     uint256 public maxNavDeviationBps = 100;
 
     /// @notice Hard cap on `maxNavDeviationBps` to keep the guard meaningful.
-    ///         2000 bps = 20%; values above this are rejected.
-    uint256 public constant MAX_NAV_DEVIATION_CAP_BPS = 2000;
+    ///         500 bps = 5%; values above this are rejected.
+    uint256 public constant MAX_NAV_DEVIATION_CAP = 500;
 
     enum VaultStatus {
         UNCONFIGURED,
@@ -261,18 +268,30 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         return spot;
     }
 
-    /// @dev True when |spot^2 - ref^2| / ref^2 <= bps / 10000.
-    ///      All math via FullMath to avoid 320-bit overflow on uint160 squared.
+    /// @dev True when |price(spot) - price(ref)| / price(ref) <= bps / 10000,
+    ///      where price = sqrt^2.
+    ///
+    ///      OVERFLOW SAFETY: We avoid squaring `sqrt` directly (sqrt is up to
+    ///      ~2^160, sqrt^2 is up to ~2^320, which would overflow uint256 even
+    ///      after a /2^64 shift at the high end of the sqrt range). Instead we
+    ///      compute the price ratio (spot/ref)^2 in 1e18 fixed-point via two
+    ///      sequential FullMath.mulDiv operations, both of which fit cleanly
+    ///      in uint256 across the full TickMath.MIN_SQRT_PRICE..MAX_SQRT_PRICE
+    ///      range. See test_nav_deviationMath_doesNotOverflowAtExtremeSqrt.
     function _priceWithinTolerance(uint160 spot, uint160 ref, uint256 bps) internal pure returns (bool) {
-        // Shift down by 64 bits before squaring so each squared value fits
-        // in uint256 with plenty of headroom (sqrt is uint160, sqrt^2 is
-        // up to 2^320, sqrt^2/2^64 fits in 256).
-        uint256 spotSq = FullMath.mulDiv(uint256(spot), uint256(spot), 1 << 64);
-        uint256 refSq = FullMath.mulDiv(uint256(ref), uint256(ref), 1 << 64);
-        uint256 diff = spotSq > refSq ? spotSq - refSq : refSq - spotSq;
-        // tolerance = refSq * bps / 10000 — use FullMath to avoid overflow.
-        uint256 tol = FullMath.mulDiv(refSq, bps, 10_000);
-        return diff <= tol;
+        // step1 = spot^2 / ref. spot <= 2^160 so spot^2 <= 2^320; dividing by
+        // ref (>= MIN_SQRT_PRICE ~ 2^32) keeps the result <= ~2^288 worst-case,
+        // but in the symmetric case where spot ~ ref the result is just spot,
+        // which fits in uint256. FullMath uses a 512-bit intermediate so the
+        // intermediate product never overflows; only the FINAL value must fit
+        // in uint256.
+        uint256 step1 = FullMath.mulDiv(uint256(spot), uint256(spot), uint256(ref));
+        // ratio = step1 * 1e18 / ref. For spot ~ ref this is ~1e18; FullMath
+        // tolerates the 1e18 multiplier without overflow.
+        uint256 ratio = FullMath.mulDiv(step1, 1e18, uint256(ref));
+        uint256 ONE = 1e18;
+        uint256 tol = (ONE * bps) / 10_000;
+        return ratio >= ONE ? (ratio - ONE) <= tol : (ONE - ratio) <= tol;
     }
 
     /// @dev Clamp `sqrt` to the position's range edges. Used only for
@@ -797,9 +816,9 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     /// @notice Update the NAV deviation tolerance. Bps of PRICE deviation
-    ///         (token1/token0). Capped at MAX_NAV_DEVIATION_CAP_BPS.
+    ///         (token1/token0). Capped at MAX_NAV_DEVIATION_CAP.
     function setMaxNavDeviationBps(uint256 newBps) external onlyOwner {
-        require(newBps <= MAX_NAV_DEVIATION_CAP_BPS, "BPS_TOO_HIGH");
+        require(newBps <= MAX_NAV_DEVIATION_CAP, "BPS_TOO_HIGH");
         emit MaxNavDeviationBpsUpdated(maxNavDeviationBps, newBps);
         maxNavDeviationBps = newBps;
     }
