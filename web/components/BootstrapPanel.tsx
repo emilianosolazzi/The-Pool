@@ -181,7 +181,7 @@ export function BootstrapPanel({ deployment, chainId, explorerBase }: Props) {
             {bonusPool !== undefined ? `${fmtUnits(bonusPool, dec, 2)} ${sym}` : '—'}
           </div>
           <div className="mt-1 text-xs text-zinc-500">
-            Earmarked for early-LP claims
+            Fills as hook fees accumulate from swaps
           </div>
         </div>
 

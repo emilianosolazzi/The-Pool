@@ -103,9 +103,13 @@ export function PlainEnglish({ deployment }: { deployment: Deployment }) {
           <div className="mt-8 rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-zinc-300">
             <span className="text-white font-semibold">Honest caveat.</span> The
             vault is single-sided: it holds {a} and earns fees while waiting to
-            convert across the owner-configured tick range. During periods when
-            the market price sits inside or above the range, the position is
-            idle until the owner calls <code className="rounded bg-white/5 px-1 font-mono">rebalance()</code>.
+            convert across the owner-configured tick range. Anyone can call{' '}
+            <code className="rounded bg-white/5 px-1 font-mono">compound()</code>{' '}
+            to harvest accrued fees into share price &mdash; that part is
+            permissionless. Moving the range itself (
+            <code className="rounded bg-white/5 px-1 font-mono">rebalance()</code>)
+            is owner-only, so if the market price drifts outside the configured
+            ticks the position can sit idle until the owner repositions it.
           </div>
         </div>
       </div>
