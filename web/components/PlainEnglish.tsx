@@ -7,9 +7,9 @@ import type { Deployment } from '@/lib/deployments';
  *  - Default split: 20% of hook fee -> treasury, 80% -> poolManager.donate()
  *    to in-range LPs. treasuryShare is owner-adjustable, hard-capped at 50%
  *    (LP share floor 50%).
- *  - Vault is ERC-4626 single-sided out-of-range (asset only, earns as price
- *    crosses into range)
- *  - Share price accrues as fees are donated; no claim flow.
+ *  - Vault is ERC-4626 single-sided out-of-range (asset only; fee capture starts
+ *    once the market price enters the configured range)
+ *  - Share price accrues as fees are donated to in-range liquidity; no claim flow.
  *  - Anyone can call compound() to harvest fees and redeploy idle balance.
  */
 export function PlainEnglish({ deployment }: { deployment: Deployment }) {
@@ -30,9 +30,11 @@ export function PlainEnglish({ deployment }: { deployment: Deployment }) {
       label: '02',
       body: (
         <>
-          The vault deploys it as a single-sided concentrated-liquidity position
-          on Uniswap&nbsp;v4 on the{' '}
+          The vault can deploy it as a single-sided concentrated-liquidity
+          position on Uniswap&nbsp;v4 on the{' '}
           <span className="text-white font-semibold">{pair}</span> pool.
+          While the live price sits above that range, the position is parked in
+          {` ${a} `}and not active swap depth yet.
         </>
       ),
     },
@@ -51,8 +53,8 @@ export function PlainEnglish({ deployment }: { deployment: Deployment }) {
       body: (
         <>
           By default <span className="text-white font-semibold">80%</span> of
-          that fee is donated back to LPs in the pool — including your vault
-          position — in the same transaction.{' '}
+          that fee is donated back to in-range LPs in the pool — including the
+          vault once its position is active — in the same transaction.{' '}
           <span className="text-zinc-400">
             (The other 20% funds the treasury. Treasury share is
             owner-adjustable, hard-capped at 50%.)
@@ -65,7 +67,7 @@ export function PlainEnglish({ deployment }: { deployment: Deployment }) {
       body: (
         <>
           Your <span className="text-white font-semibold">share price rises</span>{' '}
-          as fees accrue — no claim, no staking. Anyone can call{' '}
+          as in-range fees accrue — no claim, no staking. Anyone can call{' '}
           <code className="rounded bg-white/5 px-1 font-mono">compound()</code>{' '}
           to harvest fees and redeploy idle balance into the active range.
         </>
@@ -102,8 +104,9 @@ export function PlainEnglish({ deployment }: { deployment: Deployment }) {
 
           <div className="mt-8 rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-zinc-300">
             <span className="text-white font-semibold">Honest caveat.</span> The
-            vault is single-sided: it holds {a} and earns fees while waiting to
-            convert across the owner-configured tick range. Anyone can call{' '}
+            vault is single-sided: it can hold {a} outside the active price band
+            while waiting to convert across the owner-configured tick range.
+            Fee capture starts when liquidity is in range. Anyone can call{' '}
             <code className="rounded bg-white/5 px-1 font-mono">compound()</code>{' '}
             to harvest accrued fees into share price &mdash; that part is
             permissionless. Moving the range itself (

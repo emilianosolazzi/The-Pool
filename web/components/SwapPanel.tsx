@@ -262,10 +262,11 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
       ? { label: 'Approve Permit2 for Universal Router', onClick: onApprovePermit2 }
       : { label: `Swap ${inputSymbol} for ${outputSymbol}`, onClick: onSwap };
 
-  // Pool is "seeded" only if the LiquidityVault has deployed a real position
-  // into v4. liqDeployed comes from getVaultStats() and is the position's L.
-  // Below ~1e9 it's effectively dust (75 wei in current state), and the
-  // hook's afterSwap donate() will revert with NoLiquidityToReceiveFees().
+  // Swap enablement is conservative: until the vault reports meaningful
+  // deployed assets, hook donate() can revert with NoLiquidityToReceiveFees().
+  // Single-sided USDC positions may also be intentionally out-of-range; in that
+  // state deposits count for vault/bonus accounting but do not create active
+  // swap depth at the current tick.
   const liqDeployed = vaultStats?.[3] ?? 0n;
   const poolSeeded = liqDeployed > 1_000_000_000n; // 1e9 L threshold
 
@@ -292,12 +293,13 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
       <div className="card p-5 md:p-6">
         {!poolSeeded ? (
           <div className="mb-4 rounded-xl border border-amber-400/30 bg-amber-500/5 p-3 text-xs text-amber-200">
-            <div className="font-semibold text-amber-100">Pool not yet seeded with active liquidity</div>
+            <div className="font-semibold text-amber-100">No active in-range liquidity yet</div>
             <div className="mt-1 text-amber-200/80">
-              The LiquidityVault hasn&apos;t deployed a v4 position yet, so swaps through the hook
-              revert with <code className="text-amber-100">NoLiquidityToReceiveFees</code>. Bootstrap
-              epoch 0 must complete and the owner must call <code className="text-amber-100">rebalance()</code>
-              to mint the initial range. Until then, the form is preview-only.
+              Deposits can qualify for vault and bootstrap accounting while the
+              single-sided USDC position sits outside the live price. Swaps through
+              the hook need in-range liquidity; until price enters the range or the
+              owner rebalances around the market, the form is preview-only and may
+              revert with <code className="text-amber-100">NoLiquidityToReceiveFees</code>.
             </div>
           </div>
         ) : null}
@@ -446,7 +448,8 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
               </div>
             ) : (
               <div className="mt-3 border-t border-white/10 pt-3 text-xs text-zinc-400">
-                Hold vault shares to capture a slice of every swap&apos;s LP donation.{' '}
+                Hold vault shares to capture a slice of LP donations once the
+                vault position is in range.{' '}
                 <a href="#vault" className="text-accent-300 hover:underline">
                   Deposit USDC →
                 </a>

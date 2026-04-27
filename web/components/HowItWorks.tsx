@@ -16,7 +16,7 @@ const steps = [
   {
     n: '03',
     title: 'Share price accrues',
-    body: 'Donated fees flow to in-range LPs including the vault position; LiquidityVault share price rises — no claim, no staking. Anyone can call compound() to harvest fees and redeploy idle balance.',
+    body: 'Donated fees flow to in-range LPs including the vault position once active; LiquidityVault share price rises from those fees — no claim, no staking. Anyone can call compound() to harvest fees and redeploy idle balance.',
   },
   {
     n: '04',
@@ -81,11 +81,11 @@ export function HowItWorks({ deployment, chainId }: { deployment: Deployment; ch
         <div className="card p-5 text-sm leading-relaxed text-zinc-400">
           <div className="text-white font-semibold">Single-sided by design</div>
           <p className="mt-2">
-            The vault holds one asset and earns fees while waiting to convert across a
-            configured tick band. On the reference {deployment.pairSymbol} deployment,
-            depositors park {deployment.assetSymbol}; the vault activates as WETH drops
-            into range. Honest trade-off: during long sideways periods the asset sits idle
-            until the owner rebalances.
+            The vault holds one asset while waiting to convert across a configured
+            tick band. On the reference {deployment.pairSymbol} deployment,
+            depositors park {deployment.assetSymbol}; the vault&apos;s liquidity becomes
+            active as WETH drops into range. Honest trade-off: while price remains
+            outside the band, assets can sit idle until the owner rebalances.
           </p>
           <p className="mt-3">
             <span className="text-white">Security</span> — anti-sandwich reference-price

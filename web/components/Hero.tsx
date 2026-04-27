@@ -44,8 +44,9 @@ export function Hero({ pairSymbol }: { pairSymbol: string; swapUrl?: string }) {
         </div>
         <p className="mt-4 max-w-3xl text-sm text-zinc-400">
           Swaps route directly through this app to the pool&apos;s own hook on
-          Arbitrum One. Deposit USDC into the vault to capture 80% of every
-          hook fee in your share price.
+          Arbitrum One once the vault&apos;s range is active. Deposit USDC to enter
+          the vault and bootstrap program; hook-fee capture begins when the
+          position is in range.
         </p>
         <p className="mt-6 max-w-3xl text-xs leading-relaxed text-zinc-500">
           Bonus is share-seconds-weighted, capped at $25K per wallet and $10K per monthly epoch.
