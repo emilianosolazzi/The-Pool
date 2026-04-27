@@ -90,14 +90,9 @@ run by default; invariant runs/depth come from
 
 | # | Item | Status |
 |---|------|--------|
-| 1 | `lib/VERSIONS.md` recording upstream commit SHAs for vendored
-      `v4-core`, `v4-periphery`, `forge-std`, `openzeppelin-contracts`,
-      `permit2`, `solmate` | 🔶 PENDING |
-| 2 | CI workflow runs deterministic + fuzz reserve-fill invariant
-      suites by default | ✅ DONE (`8c962fa`) |
-| 3 | Hook-risk / audit-readiness doc — single-page summary of attack
-      surface, trust assumptions, operator runbook (rescue, retry,
-      acknowledge, pause) | 🔶 PENDING |
+| 1 | `lib/VERSIONS.md` recording upstream commit SHAs for vendored libraries | ✅ DONE (`64b48aa`) — forge-std + OZ pinned; v4-core / v4-periphery / solmate / permit2 left TO-PIN with documented resolution failures (no matching upstream tag). |
+| 2 | CI workflow runs deterministic + fuzz reserve-fill invariant suites by default | ✅ DONE (`8c962fa`) |
+| 3 | Hook-risk / audit-readiness operator runbook | ✅ DONE — [`docs/HOOK-RISK-RUNBOOK.md`](../docs/HOOK-RISK-RUNBOOK.md) |
 
 The V2.1 first-deposit donation note (founder seed-deposit recommended)
 stands; nothing in this hardening pass affects that operational guidance.
