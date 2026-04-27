@@ -4,10 +4,13 @@ import type { Deployment } from '@/lib/deployments';
  * Plain-English explainer. Facts verified against src/LiquidityVault.sol,
  * src/DynamicFeeHook.sol, src/FeeDistributor.sol:
  *  - 25 BPS base hook fee, 1.5x in volatile blocks, capped at maxFeeBps=50
- *  - 20% of hook fee -> treasury, 80% -> poolManager.donate() to in-range LPs
+ *  - Default split: 20% of hook fee -> treasury, 80% -> poolManager.donate()
+ *    to in-range LPs. treasuryShare is owner-adjustable, hard-capped at 50%
+ *    (LP share floor 50%).
  *  - Vault is ERC-4626 single-sided out-of-range (asset only, earns as price
  *    crosses into range)
- *  - Share price auto-compounds; no claim flow
+ *  - Share price accrues as fees are donated; no claim flow.
+ *  - Anyone can call compound() to harvest fees and redeploy idle balance.
  */
 export function PlainEnglish({ deployment }: { deployment: Deployment }) {
   const a = deployment.assetSymbol;
@@ -47,10 +50,13 @@ export function PlainEnglish({ deployment }: { deployment: Deployment }) {
       label: '04',
       body: (
         <>
-          <span className="text-white font-semibold">80%</span> of that fee is
-          donated back to LPs in the pool — including your vault position — in
-          the same transaction.{' '}
-          <span className="text-zinc-400">(The other 20% funds the treasury.)</span>
+          By default <span className="text-white font-semibold">80%</span> of
+          that fee is donated back to LPs in the pool — including your vault
+          position — in the same transaction.{' '}
+          <span className="text-zinc-400">
+            (The other 20% funds the treasury. Treasury share is
+            owner-adjustable, hard-capped at 50%.)
+          </span>
         </>
       ),
     },
@@ -58,9 +64,10 @@ export function PlainEnglish({ deployment }: { deployment: Deployment }) {
       label: '05',
       body: (
         <>
-          The vault{' '}
-          <span className="text-white font-semibold">auto-compounds</span>. Your
-          share price rises as fees accrue — no harvest, no reinvest, no claim.
+          Your <span className="text-white font-semibold">share price rises</span>{' '}
+          as fees accrue — no claim, no staking. Anyone can call{' '}
+          <code className="rounded bg-white/5 px-1 font-mono">compound()</code>{' '}
+          to harvest fees and redeploy idle balance into the active range.
         </>
       ),
     },

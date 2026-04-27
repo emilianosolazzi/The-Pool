@@ -11,12 +11,12 @@ const steps = [
   {
     n: '02',
     title: 'Fee is split and donated',
-    body: 'FeeDistributor routes 20% to the treasury and 80% straight into poolManager.donate() — same tx, no escrow.',
+    body: 'FeeDistributor routes 20% to the treasury and 80% straight into poolManager.donate() — same tx, no escrow. Treasury share is owner-adjustable, hard-capped at 50%.',
   },
   {
     n: '03',
-    title: 'Share price compounds',
-    body: 'Donated fees accrue to in-range LPs including the vault position; LiquidityVault share price rises — no claim, no staking.',
+    title: 'Share price accrues',
+    body: 'Donated fees flow to in-range LPs including the vault position; LiquidityVault share price rises — no claim, no staking. Anyone can call compound() to harvest fees and redeploy idle balance.',
   },
   {
     n: '04',

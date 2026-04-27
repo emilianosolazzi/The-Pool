@@ -17,13 +17,13 @@ const jetbrains = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'The Pool — Auto-compounding Uniswap v4 LP yield',
+  title: 'The Pool — Fee-yield Uniswap v4 LP vault',
   description:
-    'Fee-only, auto-compounding LP yield on Uniswap v4. 25 bps dynamic hook fee, 80% donated back to the pool on every swap. No token, no emissions, no lockups.',
+    'Fee-only LP yield on Uniswap v4. 25 bps dynamic hook fee, 80% donated back to the pool on every swap (treasury share owner-adjustable, capped at 50%). Share price accrues as fees come in. No token, no emissions, no lockups.',
   openGraph: {
     title: 'The Pool',
     description:
-      'Fee-only, auto-compounding LP yield on Uniswap v4. 25 bps dynamic hook fee, 80% donated back to the pool on every swap.',
+      'Fee-only LP yield on Uniswap v4. 25 bps dynamic hook fee, 80% donated back to the pool on every swap. Share price accrues as fees come in.',
     type: 'website',
   },
   icons: { icon: '/favicon.svg' },

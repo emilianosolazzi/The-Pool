@@ -34,7 +34,7 @@ export default function HomePage() {
                 Vault overview
               </h2>
               <p className="mt-2 text-zinc-400">
-                Live on-chain state. Deposit to start auto-compounding.
+                Live on-chain state. Deposit to start earning fee yield.
               </p>
             </div>
           </div>

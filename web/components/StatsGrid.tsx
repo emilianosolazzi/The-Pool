@@ -107,7 +107,7 @@ export function StatsGrid({ deployment, chainId }: Props) {
       value: stats
         ? `${fmtCompact(stats[4], deployment.assetDecimals)} ${deployment.assetSymbol}`
         : '—',
-      sub: 'Lifetime auto-compounded',
+      sub: 'Lifetime harvested into share price',
     },
     {
       label: 'Performance fee',
@@ -120,7 +120,7 @@ export function StatsGrid({ deployment, chainId }: Props) {
         tickLower !== undefined && tickUpper !== undefined
           ? `${tickLower} → ${tickUpper}`
           : '—',
-      sub: 'Owner-rebalanceable',
+      sub: 'Live on-chain · owner-rebalanceable',
     },
   ];
 

@@ -242,7 +242,8 @@ export function VaultCard({ deployment, chainId }: { deployment: Deployment; cha
           )}
 
           <div className="pt-1 text-[11px] text-zinc-600">
-            Deposits mint ERC-4626 shares. Share price auto-compounds as hook fees accrue.
+            Deposits mint ERC-4626 shares. Share price rises as hook fees accrue;
+            anyone can call compound() to harvest into the active range.
           </div>
         </div>
       )}
