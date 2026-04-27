@@ -237,9 +237,25 @@ export function ValueCalculator({ deployment, chainId }: Props) {
     const perfFeeRate = performanceFeeBps / 10_000;
     const vaultNetDaily = vaultGrossDaily * (1 - perfFeeRate);
 
-    const dailyYieldRate = vaultNetDaily / tvl;
-    const apr = dailyYieldRate * 365;
-    const apy = (1 + dailyYieldRate) ** 365 - 1;
+    const deposit = Math.max(parseFloat(depositAmount) || 0, 0);
+    // Use post-deposit TVL so ownership share remains in [0,1].
+    // Using deposit/tvl can exceed 100% when the simulated deposit is larger than current TVL.
+    const postDepositTvl = tvl + deposit;
+    const depositShareOfTVL = postDepositTvl > 0 ? deposit / postDepositTvl : 0;
+
+    // APR/APY are USER-PERSPECTIVE: how much *the depositor* earns on their
+    // own capital. Computing against raw `tvl` produces nonsense rates when
+    // current TVL is tiny relative to the simulated deposit (e.g. $134K%).
+    const userDailyYield = vaultNetDaily * depositShareOfTVL;
+    const userDailyYieldRate = deposit > 0 ? userDailyYield / deposit : 0;
+    const apr = userDailyYieldRate * 365;
+    const apyRaw = (1 + userDailyYieldRate) ** 365 - 1;
+    // Sanity guard: if compounding overshoots a sensible ceiling (e.g. due to
+    // user inputs that imply daily rates > a few %), cap APY display at 3x APR
+    // and at most 1000% absolute. Prevents 1e246% nonsense reaching the UI.
+    const apyCap = Math.min(3 * apr, 10);
+    const apy = Number.isFinite(apyRaw) ? Math.min(apyRaw, apyCap) : apr;
+    const apyCapped = apyRaw > apyCap;
 
     const timeframeMultipliers = {
       '1D': 1,
@@ -250,13 +266,7 @@ export function ValueCalculator({ deployment, chainId }: Props) {
 
     const days = timeframeMultipliers[timeframe];
     const projectedYield = vaultNetDaily * days;
-
-    const deposit = Math.max(parseFloat(depositAmount) || 0, 0);
-    // Use post-deposit TVL so ownership share remains in [0,1].
-    // Using deposit/tvl can exceed 100% when the simulated deposit is larger than current TVL.
-    const postDepositTvl = tvl + deposit;
-    const depositShareOfTVL = postDepositTvl > 0 ? deposit / postDepositTvl : 0;
-    const projectedReturn = projectedYield * depositShareOfTVL;
+    const projectedReturn = userDailyYield * days;
 
     return {
       tvl,
@@ -272,9 +282,11 @@ export function ValueCalculator({ deployment, chainId }: Props) {
       vaultNetDaily,
       aprPct: apr * 100,
       apyPct: apy * 100,
+      apyCapped,
       projectedYield,
       deposit,
       projectedReturn,
+      depositShareOfTVL,
       assumptions: {
         volatilityHitRatePct: volatilityRate * 100,
         vaultLiquiditySharePct: vaultLiquidityShare * 100,
@@ -389,7 +401,7 @@ export function ValueCalculator({ deployment, chainId }: Props) {
               </div>
               <div className="flex justify-between">
                 <span className="text-zinc-400">Vault share of active LP liquidity:</span>
-                <span className="text-white">{calculations.assumptions.vaultLiquiditySharePct.toFixed(2)}%</span>
+                <span className="text-white">{calculations.assumptions.vaultLiquiditySharePct.toFixed(4)}%</span>
               </div>
             </div>
           </div>
@@ -430,15 +442,17 @@ export function ValueCalculator({ deployment, chainId }: Props) {
         <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2">
           <div className="rounded bg-zinc-700/30 p-4 text-center">
             <div className="mb-1 text-4xl font-bold text-green-400">
-              {calculations.aprPct.toFixed(1)}%
+              {calculations.aprPct.toFixed(2)}%
             </div>
-            <div className="text-zinc-400">APR (contract-style linear annualization)</div>
+            <div className="text-zinc-400">APR (linear annualization on your deposit)</div>
           </div>
           <div className="rounded bg-zinc-700/30 p-4 text-center">
             <div className="mb-1 text-4xl font-bold text-blue-400">
-              {calculations.apyPct.toFixed(1)}%
+              {calculations.apyPct.toFixed(2)}%{calculations.apyCapped ? '+' : ''}
             </div>
-            <div className="text-zinc-400">APY (daily compounding projection)</div>
+            <div className="text-zinc-400">
+              APY (daily compounding{calculations.apyCapped ? ', capped at 3× APR' : ''})
+            </div>
           </div>
         </div>
 
@@ -562,7 +576,7 @@ export function ValueCalculator({ deployment, chainId }: Props) {
           </div>
           <div>
             <strong className="text-zinc-300">Vault Capture:</strong> Vault earns only its share of active in-range liquidity,
-            set here as {calculations.assumptions.vaultLiquiditySharePct.toFixed(2)}%.
+            set here as {calculations.assumptions.vaultLiquiditySharePct.toFixed(4)}%.
           </div>
           <div>
             <strong className="text-zinc-300">Performance Fee:</strong> {calculations.assumptions.performanceFeePct.toFixed(2)}%
@@ -570,8 +584,10 @@ export function ValueCalculator({ deployment, chainId }: Props) {
           </div>
           <div className="pt-2 border-t border-zinc-700">
             <em className="text-zinc-500">
-              APR equals contract-style linear annualization; APY is a separate analytical compounding projection.
-              These are scenario outputs, not guaranteed returns.
+              APR is linear annualization on your deposit:
+              {' '}vaultNetDaily × deposit/(TVL+deposit) × 365 / deposit. APY is
+              daily compounding of the same rate, capped at 3× APR for display
+              sanity. These are scenario outputs, not guaranteed returns.
             </em>
           </div>
         </div>
