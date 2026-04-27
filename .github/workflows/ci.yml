@@ -34,3 +34,33 @@ jobs:
       # (`ForkTest`, `LiquidityVaultV2ForkTest`) which require ARBITRUM_RPC_URL.
       - name: forge test
         run: forge test --no-match-contract Fork -vvv
+
+  web:
+    name: web typecheck + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        env:
+          # providers.tsx throws at module-init if this is missing. CI just
+          # needs the bundle to compile; runtime uses the real Vercel value.
+          NEXT_PUBLIC_WC_PROJECT_ID: ci-placeholder
+        run: npm run build

@@ -67,8 +67,8 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
 
   const supported = Boolean(infra && chainId === arbitrum.id && usdc && weth && hook && vault);
 
-  // Direction: `inputIsUSDC` true = USDC -> WETH (zeroForOne=false because WETH=currency0)
-  // currency0 = WETH (lower address), currency1 = USDC.
+  // Direction toggle. The actual `zeroForOne` is derived below from the live
+  // PoolKey so the UI cannot disagree with the on-chain pool ordering.
   const [inputIsUSDC, setInputIsUSDC] = useState(true);
   const [amount, setAmount] = useState('');
   const [slippageBps, setSlippageBps] = useState(50);
@@ -86,24 +86,70 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
   const inputSymbol = inputIsUSDC ? 'USDC' : 'WETH';
   const outputSymbol = inputIsUSDC ? 'WETH' : 'USDC';
 
-  // currency0 < currency1 by sort. WETH (0x82af…) < USDC (0xaf88…), so:
-  //   USDC -> WETH means input=currency1 -> output=currency0  => zeroForOne=false
-  //   WETH -> USDC means input=currency0 -> output=currency1  => zeroForOne=true
-  const zeroForOne = !inputIsUSDC;
+  // ── Live PoolKey — single source of truth ──────────────────────────────
+  // Read the PoolKey straight from the deployed vault. This guarantees the
+  // frontend quotes/swaps against the SAME PoolKey the vault and hook own,
+  // even if `fee`, `tickSpacing`, or `hooks` ever change. Env-derived values
+  // are used only as a fallback before the vault has been configured.
+  const { data: livePoolKeyData } = useReadContract({
+    address: vault,
+    abi: vaultAbi,
+    functionName: 'poolKey',
+    chainId,
+    query: { enabled: supported && Boolean(vault), refetchInterval: 30_000 },
+  });
 
-  // Pool params must match the deployed pool key. The redeployed pool uses
-  // tickSpacing=60 (a fresh PoolKey distinct from the v3-style 0.05% pool that
-  // shares fee=500 / tickSpacing=10 on the same token pair).
-  const poolKey = useMemo(
-    () => ({
+  const livePoolKey = livePoolKeyData as
+    | {
+        currency0: Address;
+        currency1: Address;
+        fee: number;
+        tickSpacing: number;
+        hooks: Address;
+      }
+    | undefined;
+
+  const liveKeyValid =
+    !!livePoolKey &&
+    livePoolKey.currency0 !== ZERO &&
+    livePoolKey.currency1 !== ZERO &&
+    livePoolKey.hooks !== ZERO;
+
+  const poolKey = useMemo(() => {
+    if (liveKeyValid && livePoolKey) {
+      return {
+        currency0: livePoolKey.currency0,
+        currency1: livePoolKey.currency1,
+        fee: Number(livePoolKey.fee),
+        tickSpacing: Number(livePoolKey.tickSpacing),
+        hooks: livePoolKey.hooks,
+      };
+    }
+    // Fallback: env-derived. Used only before the vault sets its PoolKey.
+    return {
       currency0: weth ?? ZERO,
       currency1: usdc ?? ZERO,
       fee: 500,
       tickSpacing: 60,
       hooks: hook ?? ZERO,
-    }),
-    [weth, usdc, hook],
-  );
+    };
+  }, [liveKeyValid, livePoolKey, weth, usdc, hook]);
+
+  // Derive zeroForOne from the live PoolKey, not from the UI direction toggle.
+  // currency0 < currency1 by v4 invariant. zeroForOne = (input == currency0).
+  const lc = (a: Address) => a.toLowerCase();
+  const inputIsCurrency0 = lc(inputToken) === lc(poolKey.currency0);
+  const inputIsCurrency1 = lc(inputToken) === lc(poolKey.currency1);
+  const zeroForOne = inputIsCurrency0;
+
+  // Guardrail: if the selected swap tokens are not BOTH part of the pool, the
+  // user is looking at a stale or misconfigured deployment. Surface as a plan
+  // error so the swap button stays disabled with a clear reason.
+  const currencyMismatch =
+    liveKeyValid &&
+    inputToken !== ZERO &&
+    outputToken !== ZERO &&
+    !(inputIsCurrency0 || inputIsCurrency1);
 
   const amountIn = useMemo(() => {
     if (!amount) return 0n;
@@ -235,6 +281,10 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
   const onSwap = () => {
     if (amountIn === 0n || minOut === 0n) return;
     setPlanError(null);
+    if (currencyMismatch) {
+      setPlanError('SELECTED_TOKENS_NOT_IN_LIVE_POOL');
+      return;
+    }
     const plan: SwapPlan = {
       poolKey,
       zeroForOne,
@@ -281,18 +331,20 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
       ? { label: 'Approve Permit2 for Universal Router', onClick: onApprovePermit2 }
       : { label: `Swap ${inputSymbol} for ${outputSymbol}`, onClick: onSwap };
 
-  // Swap enablement is conservative: until the vault reports meaningful
-  // deployed assets, hook donate() can revert with NoLiquidityToReceiveFees().
-  // Single-sided USDC positions may also be intentionally out-of-range; in that
-  // state deposits count for vault/bonus accounting but do not create active
-  // swap depth at the current tick.
+  // Swap enablement is quote-driven: the V4Quoter is the authoritative
+  // signal that the live PoolKey can actually fill `amountIn`. `liqDeployed`
+  // is kept as informational context only — it is not a gate.
   const liqDeployed = vaultStats?.[3] ?? 0n;
-  const poolSeeded = liqDeployed > 1_000_000_000n; // 1e9 L threshold
+  const poolSeeded = liqDeployed > 1_000_000_000n; // info-only threshold
 
   const swapDisabled =
+    !supported ||
+    currencyMismatch ||
     amountIn === 0n ||
     !amountOut ||
-    !poolSeeded ||
+    amountOut === 0n ||
+    minOut === 0n ||
+    Boolean(planError) ||
     isPending ||
     isMining ||
     (inBalance !== undefined && amountIn > inBalance);
@@ -313,15 +365,25 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
       </div>
 
       <div className="card p-5 md:p-6">
+        {currencyMismatch ? (
+          <div className="mb-4 rounded-xl border border-red-400/30 bg-red-500/5 p-3 text-xs text-red-200">
+            <div className="font-semibold text-red-100">Token / pool mismatch</div>
+            <div className="mt-1 text-red-200/80">
+              The selected tokens are not part of the vault&apos;s live PoolKey
+              ({poolKey.currency0.slice(0, 6)}… / {poolKey.currency1.slice(0, 6)}…).
+              The frontend may be pointing at a stale deployment.
+            </div>
+          </div>
+        ) : null}
         {!poolSeeded ? (
           <div className="mb-4 rounded-xl border border-amber-400/30 bg-amber-500/5 p-3 text-xs text-amber-200">
-            <div className="font-semibold text-amber-100">No active in-range liquidity yet</div>
+            <div className="font-semibold text-amber-100">Low deployed liquidity (informational)</div>
             <div className="mt-1 text-amber-200/80">
-              Deposits can qualify for vault and bootstrap accounting while the
-              single-sided USDC position sits outside the live price. Swaps through
-              the hook need in-range liquidity; until price enters the range or the
-              owner rebalances around the market, the form is preview-only and may
-              revert with <code className="text-amber-100">NoLiquidityToReceiveFees</code>.
+              Vault reports little or no deployed liquidity. Quotes from the V4Quoter are
+              authoritative — if a quote returns, the swap is enabled. Quote failures
+              may indicate the pool has no in-range liquidity (e.g. a single-sided USDC
+              position outside the live tick), in which case
+              <code className="text-amber-100">NoLiquidityToReceiveFees</code> can revert.
             </div>
           </div>
         ) : null}
