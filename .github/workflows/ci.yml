@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: forge build + test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Show forge version
+        run: forge --version
+
+      - name: forge build
+        run: forge build --sizes
+
+      # Runs the full repo suite (unit + integration + deterministic
+      # reserve-fill conservation invariants in test/ReserveFillInvariants.t.sol
+      # + handler-driven fuzz invariants in test/ReserveFillFuzzInvariants.t.sol).
+      # `--no-match-contract Fork` excludes the Arbitrum fork suites
+      # (`ForkTest`, `LiquidityVaultV2ForkTest`) which require ARBITRUM_RPC_URL.
+      - name: forge test
+        run: forge test --no-match-contract Fork -vvv
