@@ -363,6 +363,40 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         return VaultStatus.OUT_OF_RANGE;
     }
 
+    /// @notice Aggregated read for UIs. Pure view, mirrors V1 surface so the
+    ///         frontend can keep a single read for the headline stats.
+    /// @return tvl          totalAssets() in asset units
+    /// @return sharePrice   asset-per-share, normalized to 1e18 (1e18 = no yield)
+    /// @return depositors   distinct addresses that have ever deposited
+    /// @return liqDeployed  cumulative asset notional currently committed to LP
+    /// @return yieldColl    lifetime asset-token yield collected (post fee)
+    /// @return feeDesc      static UI hint; authoritative bps live on the hook
+    function getVaultStats()
+        external
+        view
+        returns (
+            uint256 tvl,
+            uint256 sharePrice,
+            uint256 depositors,
+            uint256 liqDeployed,
+            uint256 yieldColl,
+            string memory feeDesc
+        )
+    {
+        tvl = totalAssets();
+        if (totalSupply() == 0) {
+            sharePrice = 1e18;
+        } else {
+            uint256 oneShareUnit = 10 ** uint256(decimals());
+            uint256 oneAssetUnit = 10 ** (uint256(decimals()) - uint256(_decimalsOffset()));
+            sharePrice = convertToAssets(oneShareUnit).mulDiv(1e18, oneAssetUnit);
+        }
+        depositors = totalDepositors;
+        liqDeployed = assetsDeployed;
+        yieldColl = totalYieldCollected;
+        feeDesc = "Hook fee + base pool fee. Read on-chain: DynamicFeeHookV2.HOOK_FEE_BPS, FeeDistributor.treasuryShare, PoolKey.fee";
+    }
+
     function maxDeposit(address) public view override returns (uint256) {
         if (paused() || !_poolKeySet) return 0;
         if (maxTVL == 0) return type(uint256).max;
