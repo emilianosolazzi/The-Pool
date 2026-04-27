@@ -13,9 +13,9 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
-import {DynamicFeeHook} from "../src/DynamicFeeHook.sol";
-import {FeeDistributor} from "../src/FeeDistributor.sol";
-import {HookMiner} from "./utils/HookMiner.sol";
+import {DynamicFeeHook} from "../../src/archive-v1/DynamicFeeHook.sol";
+import {FeeDistributor} from "../../src/FeeDistributor.sol";
+import {HookMiner} from "../utils/HookMiner.sol";
 
 contract IntegrationTest is Test, Deployers {
     using CurrencyLibrary for Currency;

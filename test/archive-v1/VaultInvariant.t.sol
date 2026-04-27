@@ -11,7 +11,7 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {LiquidityVault} from "../../src/LiquidityVault.sol";
+import {LiquidityVault} from "../../src/archive-v1/LiquidityVault.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockPoolManager} from "../mocks/MockPoolManager.sol";
 import {MockPositionManager} from "../mocks/MockPositionManager.sol";

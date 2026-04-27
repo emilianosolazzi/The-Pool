@@ -9,6 +9,10 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
+interface IERC20Like {
+    function balanceOf(address) external view returns (uint256);
+}
+
 contract FeeDistributor is Ownable2Step, ReentrancyGuard {
     using CurrencyLibrary for Currency;
     using PoolIdLibrary for PoolKey;
@@ -39,6 +43,8 @@ contract FeeDistributor is Ownable2Step, ReentrancyGuard {
     uint256 public distributionCount;
 
     event FeeDistributed(address indexed currency, uint256 total, uint256 treasury, uint256 lp, uint256 id);
+    event FeeDistributionRetried(address indexed currency, uint256 amount, address indexed caller);
+    event UndistributedSwept(address indexed currency, address indexed to, uint256 amount);
     event PoolKeySet(bytes32 indexed poolId);
     event HookUpdated(address indexed old, address indexed newHook);
     event TreasuryUpdated(address indexed old, address indexed newTreasury);
@@ -53,6 +59,46 @@ contract FeeDistributor is Ownable2Step, ReentrancyGuard {
 
     function distribute(Currency currency, uint256 amount) external nonReentrant {
         require(msg.sender == hook, "ONLY_HOOK");
+        _distribute(currency, amount);
+    }
+
+    /// @notice Re-run distribution accounting against a balance physically
+    ///         present in this contract. Intended for the post-`FeeDistributionFailed`
+    ///         recovery path on the hook side: tokens already arrived here but
+    ///         the original `distribute()` reverted (e.g. a transient pool issue,
+    ///         missing pool key at the time, etc.). Owner re-tries once the
+    ///         underlying cause is cleared. Strict balance check prevents
+    ///         double-counting.
+    function retryDistribute(Currency currency, uint256 amount) external onlyOwner nonReentrant {
+        require(amount > 0, "ZERO_AMOUNT");
+        uint256 bal = IERC20Like(Currency.unwrap(currency)).balanceOf(address(this));
+        require(bal >= amount, "INSUFFICIENT_BALANCE");
+        emit FeeDistributionRetried(Currency.unwrap(currency), amount, msg.sender);
+        _distribute(currency, amount);
+    }
+
+    /// @notice Last-resort owner escape hatch. Moves stuck pool-currency
+    ///         tokens out of the distributor — used only when re-distributing
+    ///         is not feasible (e.g. pool key was migrated, donate target
+    ///         unreachable). Restricted to pool-key currencies so the function
+    ///         cannot exfiltrate unrelated assets.
+    function sweepUndistributed(Currency currency, address to, uint256 amount)
+        external
+        onlyOwner
+        nonReentrant
+    {
+        require(to != address(0), "ZERO_ADDRESS");
+        require(amount > 0, "ZERO_AMOUNT");
+        address currencyAddr = Currency.unwrap(currency);
+        require(_poolKeySet, "POOL_KEY_NOT_SET");
+        if (currencyAddr != Currency.unwrap(poolKey.currency0) && currencyAddr != Currency.unwrap(poolKey.currency1)) {
+            revert InvalidDistributionCurrency(currencyAddr);
+        }
+        currency.transfer(to, amount);
+        emit UndistributedSwept(currencyAddr, to, amount);
+    }
+
+    function _distribute(Currency currency, uint256 amount) internal {
         require(_poolKeySet, "POOL_KEY_NOT_SET");
         require(amount > 0, "ZERO_AMOUNT");
         address currencyAddr = Currency.unwrap(currency);

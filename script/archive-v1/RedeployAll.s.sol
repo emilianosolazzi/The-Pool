@@ -12,11 +12,11 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {DynamicFeeHook} from "../src/DynamicFeeHook.sol";
-import {FeeDistributor} from "../src/FeeDistributor.sol";
-import {LiquidityVault} from "../src/LiquidityVault.sol";
-import {BootstrapRewards} from "../src/BootstrapRewards.sol";
-import {HookMiner} from "../test/utils/HookMiner.sol";
+import {DynamicFeeHook} from "../../src/archive-v1/DynamicFeeHook.sol";
+import {FeeDistributor} from "../../src/FeeDistributor.sol";
+import {LiquidityVault} from "../../src/archive-v1/LiquidityVault.sol";
+import {BootstrapRewards} from "../../src/BootstrapRewards.sol";
+import {HookMiner} from "../../test/utils/HookMiner.sol";
 
 /// @notice Clean full redeploy: distributor, vault, NEW hook (owner = EOA),
 ///         bootstrap, fresh pool. The new hook fixes the Ownable(msg.sender)

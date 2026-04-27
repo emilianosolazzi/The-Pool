@@ -40,6 +40,102 @@ contract MockZapRouter is IZapRouter {
     }
 }
 
+contract MockReserveHook {
+    // proceedsOwed[vault][currency_addr] = amount
+    mapping(address => mapping(address => uint256)) public proceeds;
+    // escrowedReserve[vault][currency_addr] = amount  (live offer inventory)
+    mapping(address => mapping(address => uint256)) public escrow;
+    address public lastSellCurrency;
+    uint128 public lastSellAmount;
+    uint160 public lastSqrtPriceX96;
+    uint64  public lastExpiry;
+    bool    public cancelCalled;
+    uint128 public escrowToReturnOnCancel;
+    bool    public hasActiveOffer;
+    bool    public forceCancelRevert;
+
+    function setProceedsOwed(address vault_, address currency_, uint256 amt) external {
+        proceeds[vault_][currency_] = amt;
+    }
+
+    function setEscrow(address vault_, address currency_, uint256 amt) external {
+        escrow[vault_][currency_] = amt;
+    }
+
+    function setEscrowToReturnOnCancel(uint128 amt, bool active) external {
+        escrowToReturnOnCancel = amt;
+        hasActiveOffer = active;
+    }
+
+    function setForceCancelRevert(bool v) external {
+        forceCancelRevert = v;
+    }
+
+    function proceedsOwed(address vault_, Currency c) external view returns (uint256) {
+        return proceeds[vault_][Currency.unwrap(c)];
+    }
+
+    function escrowedReserve(address vault_, Currency c) external view returns (uint256) {
+        return escrow[vault_][Currency.unwrap(c)];
+    }
+
+    function offerActive(PoolKey calldata) external view returns (bool) {
+        return hasActiveOffer;
+    }
+
+    function claimReserveProceeds(Currency c) external returns (uint256 a) {
+        address ca = Currency.unwrap(c);
+        a = proceeds[msg.sender][ca];
+        if (a > 0) {
+            proceeds[msg.sender][ca] = 0;
+            // Mock holds the tokens; transfer to caller.
+            IERC20(ca).transfer(msg.sender, a);
+        }
+    }
+
+    function cancelReserveOffer(PoolKey calldata) external returns (uint128 returned) {
+        cancelCalled = true;
+        if (forceCancelRevert) revert("MOCK_CANCEL_FORCED_REVERT");
+        if (!hasActiveOffer) revert("NO_OFFER");
+        returned = escrowToReturnOnCancel;
+        if (returned > 0 && lastSellCurrency != address(0)) {
+            escrow[msg.sender][lastSellCurrency] = 0;
+            IERC20(lastSellCurrency).transfer(msg.sender, returned);
+        }
+        hasActiveOffer = false;
+    }
+
+    function createReserveOffer(
+        PoolKey calldata,
+        Currency sellCurrency,
+        uint128 sellAmount,
+        uint160 sqrtPriceX96,
+        uint64 expiry
+    ) external {
+        lastSellCurrency = Currency.unwrap(sellCurrency);
+        lastSellAmount = sellAmount;
+        lastSqrtPriceX96 = sqrtPriceX96;
+        lastExpiry = expiry;
+        hasActiveOffer = true;
+        IERC20(lastSellCurrency).transferFrom(msg.sender, address(this), sellAmount);
+        escrow[msg.sender][lastSellCurrency] += sellAmount;
+    }
+
+    /// @notice Test-only helper to simulate a swap fill: reduce escrow in
+    ///         sellCurrency, credit proceeds in buyCurrency.
+    function simulateFill(
+        address vault_,
+        address sellCurrency_,
+        uint256 escrowConsumed,
+        address buyCurrency_,
+        uint256 proceedsCredited
+    ) external {
+        require(escrow[vault_][sellCurrency_] >= escrowConsumed, "MOCK_OVERFILL");
+        escrow[vault_][sellCurrency_] -= escrowConsumed;
+        proceeds[vault_][buyCurrency_] += proceedsCredited;
+    }
+}
+
 contract LiquidityVaultV2Test is Test {
     LiquidityVaultV2 public vault;
     MockERC20 public usdc;
@@ -167,5 +263,310 @@ contract LiquidityVaultV2Test is Test {
         weth.mint(address(vault), 1 ether);
         mockManager.setSlot0(type(uint160).max, -198900);
         vault.totalAssets();
+    }
+
+    // ---------------------------------------------------------------
+    // P0 #3 — setRemoveLiquiditySlippageBps capped at 100 bps (1%).
+    // ---------------------------------------------------------------
+    function test_setRemoveLiquiditySlippageBps_acceptsAtCap() public {
+        vault.setRemoveLiquiditySlippageBps(100);
+        assertEq(vault.removeLiquiditySlippageBps(), 100);
+    }
+
+    function test_setRemoveLiquiditySlippageBps_revertsAboveCap() public {
+        vm.expectRevert("SLIPPAGE_TOO_HIGH");
+        vault.setRemoveLiquiditySlippageBps(101);
+    }
+
+    function test_setRemoveLiquiditySlippageBps_onlyOwner() public {
+        vm.prank(alice);
+        vm.expectRevert();
+        vault.setRemoveLiquiditySlippageBps(50);
+    }
+
+    // ---------------------------------------------------------------
+    // P0 #2 — setInitialTicks: pre-deposit-only tick band config.
+    // ---------------------------------------------------------------
+    function test_setInitialTicks_alignsAndUpdates() public {
+        // poolKey.tickSpacing = 60 (set in setUp).
+        vault.setInitialTicks(-3000, 3000);
+        assertEq(vault.tickLower(), -3000);
+        assertEq(vault.tickUpper(), 3000);
+    }
+
+    function test_setInitialTicks_revertsWhenNotSpacingAligned() public {
+        vm.expectRevert("TICK_NOT_ALIGNED");
+        vault.setInitialTicks(-3001, 3000);
+    }
+
+    function test_setInitialTicks_revertsWhenInverted() public {
+        vm.expectRevert("INVALID_TICKS");
+        vault.setInitialTicks(3000, -3000);
+    }
+
+    function test_setInitialTicks_onlyOwner() public {
+        vm.prank(alice);
+        vm.expectRevert();
+        vault.setInitialTicks(-3000, 3000);
+    }
+
+    // ---------------------------------------------------------------
+    // P0 #1 — totalAssets() includes pendingProceeds (asset currency).
+    // ---------------------------------------------------------------
+    function test_totalAssets_includesPendingProceedsInAssetCurrency() public {
+        MockReserveHook mh = new MockReserveHook();
+        vault.setReserveHook(address(mh));
+
+        // Pre-state: vault owns no token1, no liquidity. totalAssets = 0.
+        uint256 t0 = vault.totalAssets();
+
+        // Stage 12.5 USDC of pending proceeds for the vault.
+        // Asset currency is USDC.
+        usdc.mint(address(mh), 12_500_000); // 12.5 USDC (6 decimals)
+        mh.setProceedsOwed(address(vault), address(usdc), 12_500_000);
+
+        uint256 t1 = vault.totalAssets();
+        assertEq(t1 - t0, 12_500_000, "NAV must include hook-side pending proceeds in asset currency");
+    }
+
+    // ---------------------------------------------------------------
+    // P0 #1 — entry path auto-claims proceeds before share math.
+    // ---------------------------------------------------------------
+    function test_deposit_autoClaimsProceedsFromHook() public {
+        MockReserveHook mh = new MockReserveHook();
+        vault.setReserveHook(address(mh));
+
+        // Stage proceeds in BOTH currencies.
+        usdc.mint(address(mh), 5_000_000); // 5 USDC
+        weth.mint(address(mh), 0.25 ether);
+        mh.setProceedsOwed(address(vault), address(usdc), 5_000_000);
+        mh.setProceedsOwed(address(vault), address(weth), 0.25 ether);
+
+        // Alice deposits MIN_DEPOSIT to trigger _pullReserveProceedsBoth.
+        uint256 dep = vault.MIN_DEPOSIT();
+        usdc.mint(alice, dep);
+        // Pre-fund zap + lp side so depositWithZap is not strictly needed —
+        // the simple deposit path also runs the proceeds pull.
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vault.deposit(dep, alice);
+        vm.stopPrank();
+
+        // After: vault must have received the staged proceeds physically,
+        // and hook ledger must be drained.
+        assertEq(mh.proceeds(address(vault), address(usdc)), 0, "hook proceeds USDC drained");
+        assertEq(mh.proceeds(address(vault), address(weth)), 0, "hook proceeds WETH drained");
+        // Vault USDC balance includes the 5 USDC pulled + the deposit (deposit
+        // currency is USDC, so post-deposit balance contains both).
+        assertGe(usdc.balanceOf(address(vault)), 5_000_000);
+        assertEq(weth.balanceOf(address(vault)), 0.25 ether);
+    }
+
+    // ---------------------------------------------------------------
+    // P1 #B1 — rebalanceOffer is atomic: cancel → claim both → repost.
+    // ---------------------------------------------------------------
+    function test_rebalanceOffer_atomicCancelClaimRepost() public {
+        MockReserveHook mh = new MockReserveHook();
+        vault.setReserveHook(address(mh));
+
+        // Pre-stage: an active offer of 1 WETH already escrowed in the hook,
+        // plus 0.4 WETH proceeds owed to the vault from a prior partial fill.
+        weth.mint(address(mh), 1 ether);   // escrow held by hook
+        weth.mint(address(mh), 0.4 ether); // proceeds also held by hook
+        mh.setProceedsOwed(address(vault), address(weth), 0.4 ether);
+        // Tell mock about the active offer so cancel returns escrow.
+        // Pretend prior offer was for WETH:
+        vm.store(
+            address(mh),
+            bytes32(uint256(1)), // lastSellCurrency slot — easier to set directly via call:
+            bytes32(0)
+        );
+        // Actually, just call createReserveOffer once with vault's tokens to populate state cleanly.
+        // To do that we need vault to have allowance + balance — skip this and rely on direct setter:
+        mh.setEscrowToReturnOnCancel(1 ether, true);
+        // Inject lastSellCurrency by calling create from vault for 0 amount? Use a tiny helper-style:
+        // Use vm.store to set the lastSellCurrency address at slot computed manually is fragile;
+        // instead, use a fresh approach: have the MOCK transfer escrow back from its own balance
+        // regardless of "lastSellCurrency", by patching mock. (Already does so only when
+        // lastSellCurrency != 0). So we set it via a one-time helper:
+        // Workaround: have vault create an initial offer via offerReserveToHook style? Too coupled.
+        // Cleanest: pre-fund by minting vault, calling offerReserveToHook (which forwards to mock).
+        weth.mint(address(vault), 1 ether);
+        vm.prank(vault.owner());
+        vault.offerReserveToHook(Currency.wrap(address(weth)), 1 ether, uint160(1 << 96), 0);
+        // Now mock has lastSellCurrency=weth and active=true (overwrites direct setter).
+        mh.setEscrowToReturnOnCancel(1 ether, true);
+
+        // Fund vault with NEW inventory for the repost (0.6 WETH).
+        weth.mint(address(vault), 0.6 ether);
+
+        uint160 newSqrt = uint160(2 << 96);
+        uint64 newExpiry = uint64(block.timestamp + 3600);
+        vm.prank(vault.owner());
+        vault.rebalanceOffer(Currency.wrap(address(weth)), 0.6 ether, newSqrt, newExpiry);
+
+        // Assertions:
+        // 1) Cancel was called.
+        assertTrue(mh.cancelCalled(), "cancel was called");
+        // 2) Both claim slots drained (only weth was non-zero).
+        assertEq(mh.proceeds(address(vault), address(weth)), 0, "weth proceeds drained");
+        // 3) New offer is active with the new params.
+        assertTrue(mh.hasActiveOffer(), "new offer is active");
+        assertEq(mh.lastSellCurrency(), address(weth));
+        assertEq(uint256(mh.lastSellAmount()), 0.6 ether);
+        assertEq(uint256(mh.lastSqrtPriceX96()), uint256(newSqrt));
+        assertEq(uint256(mh.lastExpiry()), uint256(newExpiry));
+    }
+
+    // ---------------------------------------------------------------
+    // P0 #1++ — NAV is continuous across the FULL reserve-offer lifecycle:
+    //          baseline → posted (escrow) → partial fill → full fill → claim.
+    //          (Plus a separate cancel branch.)
+    //
+    // Drives bookkeeping in the asset currency (USDC) so the cross-currency
+    // sqrt-price math doesn't drown out the assertion. The point being
+    // measured is: "vault NAV does not drop when reserve inventory leaves the
+    // idle balance and lives at the hook (escrowed or as pending proceeds)."
+    // ---------------------------------------------------------------
+    function test_totalAssets_continuousAcrossOfferLifecycle() public {
+        MockReserveHook mh = new MockReserveHook();
+        vault.setReserveHook(address(mh));
+
+        // Seed: 1.0 USDC of vault inventory parked idle.
+        uint256 SEED = 1_000_000; // 1 USDC
+        usdc.mint(address(vault), SEED);
+
+        // (1) Baseline.
+        uint256 navBaseline = vault.totalAssets();
+        assertEq(navBaseline, SEED, "baseline = idle balance");
+
+        // (2) Post offer: idle USDC moves from vault into hook escrow.
+        vm.prank(address(vault));
+        usdc.transfer(address(mh), SEED);
+        mh.setEscrow(address(vault), address(usdc), SEED);
+
+        uint256 navPosted = vault.totalAssets();
+        assertEq(navPosted, navBaseline, "NAV unchanged when offer is posted (escrow counts)");
+
+        // (3) Partial fill: 0.4 USDC of escrow consumed, 0.4 USDC credited as proceeds.
+        mh.simulateFill(address(vault), address(usdc), 400_000, address(usdc), 400_000);
+
+        uint256 navPartial = vault.totalAssets();
+        assertEq(navPartial, navBaseline, "NAV unchanged after partial fill (escrow + proceeds)");
+
+        // (4) Full fill: remaining 0.6 USDC of escrow consumed → all proceeds.
+        mh.simulateFill(address(vault), address(usdc), 600_000, address(usdc), 600_000);
+
+        uint256 navFilled = vault.totalAssets();
+        assertEq(navFilled, navBaseline, "NAV unchanged at full fill (proceeds only)");
+        assertEq(mh.escrow(address(vault), address(usdc)), 0);
+        assertEq(mh.proceeds(address(vault), address(usdc)), SEED);
+
+        // (5) Claim: vault pulls proceeds physically. NAV unchanged; tokens
+        //     just shift from "pending at hook" to "idle at vault".
+        vault.collectReserveProceeds(Currency.wrap(address(usdc)));
+        uint256 navClaimed = vault.totalAssets();
+        assertEq(navClaimed, navBaseline, "NAV unchanged after claim");
+        assertEq(usdc.balanceOf(address(vault)), SEED, "tokens are physically back in the vault");
+        assertEq(mh.proceeds(address(vault), address(usdc)), 0);
+    }
+
+    function test_totalAssets_continuousAcrossOfferCancel() public {
+        MockReserveHook mh = new MockReserveHook();
+        vault.setReserveHook(address(mh));
+
+        uint256 SEED = 1_000_000;
+        usdc.mint(address(vault), SEED);
+        uint256 navBaseline = vault.totalAssets();
+
+        // Post via the real vault path so the mock's lastSellCurrency is set
+        // and a future cancel can faithfully transfer escrow back.
+        vm.prank(vault.owner());
+        vault.offerReserveToHook(Currency.wrap(address(usdc)), uint128(SEED), uint160(1 << 96), 0);
+        mh.setEscrowToReturnOnCancel(uint128(SEED), true);
+
+        uint256 navPosted = vault.totalAssets();
+        assertEq(navPosted, navBaseline, "NAV unchanged when offer is posted via real path");
+
+        // Cancel: escrow returns to vault.
+        vm.prank(vault.owner());
+        uint128 returned = vault.cancelReserveOffer(Currency.wrap(address(usdc)));
+        assertEq(uint256(returned), SEED);
+
+        uint256 navCancelled = vault.totalAssets();
+        assertEq(navCancelled, navBaseline, "NAV unchanged after cancel");
+        assertEq(usdc.balanceOf(address(vault)), SEED, "escrow physically returned to vault");
+    }
+
+    // ---------------------------------------------------------------
+    // Hardening — setPoolKey rejects native ETH currencies explicitly.
+    // ---------------------------------------------------------------
+    function test_setPoolKey_revertsOnNativeCurrency() public {
+        // Fresh vault (setUp's vault already has a poolKey set).
+        LiquidityVaultV2 v2 = new LiquidityVaultV2(
+            usdc,
+            IPoolManager(address(mockManager)),
+            IPositionManager(address(mockPosMgr)),
+            "LP Vault V2 native test",
+            "LPV2N",
+            address(0),
+            address(zapRouter)
+        );
+
+        PoolKey memory nativeKey = PoolKey({
+            currency0: Currency.wrap(address(0)), // native ETH
+            currency1: Currency.wrap(address(usdc)),
+            fee: 500,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+
+        vm.expectRevert("NATIVE_NOT_SUPPORTED");
+        v2.setPoolKey(nativeKey);
+    }
+
+    // ---------------------------------------------------------------
+    // Hardening — rebalanceOffer skips cancel cleanly when no offer is
+    //             active (offerActive view returns false).
+    // ---------------------------------------------------------------
+    function test_rebalanceOffer_skipsCancelWhenNoActiveOffer() public {
+        MockReserveHook mh = new MockReserveHook();
+        vault.setReserveHook(address(mh));
+
+        // No prior offer — hasActiveOffer remains false.
+        // Fund vault with inventory for the new offer.
+        weth.mint(address(vault), 0.5 ether);
+
+        vm.prank(vault.owner());
+        vault.rebalanceOffer(Currency.wrap(address(weth)), 0.5 ether, uint160(1 << 96), 0);
+
+        // Cancel must NOT have been called when offerActive returned false.
+        assertFalse(mh.cancelCalled(), "cancel skipped when no active offer");
+        assertTrue(mh.hasActiveOffer(), "new offer is now active");
+        assertEq(uint256(mh.lastSellAmount()), 0.5 ether);
+    }
+
+    // ---------------------------------------------------------------
+    // Hardening — rebalanceOffer no longer swallows real cancel failures.
+    //             A reverting cancel must bubble up, not be silently
+    //             treated as "no offer".
+    // ---------------------------------------------------------------
+    function test_rebalanceOffer_revertsOnRealCancelFailure() public {
+        MockReserveHook mh = new MockReserveHook();
+        vault.setReserveHook(address(mh));
+
+        // Post a real offer so offerActive == true.
+        weth.mint(address(vault), 1 ether);
+        vm.prank(vault.owner());
+        vault.offerReserveToHook(Currency.wrap(address(weth)), 1 ether, uint160(1 << 96), 0);
+        assertTrue(mh.hasActiveOffer());
+
+        // Force the next cancel to revert (simulates hook bug / accounting error).
+        mh.setForceCancelRevert(true);
+
+        weth.mint(address(vault), 0.6 ether);
+        vm.prank(vault.owner());
+        vm.expectRevert("MOCK_CANCEL_FORCED_REVERT");
+        vault.rebalanceOffer(Currency.wrap(address(weth)), 0.6 ether, uint160(2 << 96), 0);
     }
 }

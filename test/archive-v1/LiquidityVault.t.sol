@@ -11,10 +11,10 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
-import {LiquidityVault} from "../src/LiquidityVault.sol";
-import {MockERC20} from "./mocks/MockERC20.sol";
-import {MockPoolManager} from "./mocks/MockPoolManager.sol";
-import {MockPositionManager} from "./mocks/MockPositionManager.sol";
+import {LiquidityVault} from "../../src/archive-v1/LiquidityVault.sol";
+import {MockERC20} from "../mocks/MockERC20.sol";
+import {MockPoolManager} from "../mocks/MockPoolManager.sol";
+import {MockPositionManager} from "../mocks/MockPositionManager.sol";
 
 contract LiquidityVaultTest is Test {
     using Math for uint256;

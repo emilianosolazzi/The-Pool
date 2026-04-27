@@ -16,7 +16,7 @@ import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
-import {LiquidityAmounts} from "v4-core-test/utils/LiquidityAmounts.sol";
+import {LiquidityAmounts} from "./libraries/LiquidityAmounts.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
@@ -33,6 +33,13 @@ interface IReserveHook {
     ) external;
     function cancelReserveOffer(PoolKey calldata key) external returns (uint128);
     function claimReserveProceeds(Currency currency) external returns (uint256);
+    /// @notice View accessor for the public mapping `proceedsOwed[vault][currency]`.
+    function proceedsOwed(address vault, Currency currency) external view returns (uint256);
+    /// @notice View accessor for the public mapping `escrowedReserve[vault][sellCurrency]`.
+    function escrowedReserve(address vault, Currency currency) external view returns (uint256);
+    /// @notice True when the pool has an active reserve offer. Used to gate
+    ///         cancel calls so real failures bubble instead of being swallowed.
+    function offerActive(PoolKey calldata key) external view returns (bool);
 }
 
 /// @notice ERC-4626 USDC-entry vault that can zap into active dual-token v4 liquidity.
@@ -142,14 +149,38 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
 
         address otherAddr = _otherToken();
         uint256 idleOther = otherAddr.code.length > 0 ? IERC20(otherAddr).balanceOf(address(this)) : 0;
+
+        // Pending reserve-sale proceeds held by the hook on this vault's behalf.
+        // These are economically owned by depositors *now*; ignoring them would
+        // let new depositors mint shares cheaper than the live NAV.
+        // Likewise, escrowed reserve inventory is still vault-owned (the hook
+        // is just a custodian until it fills, expires, or is cancelled), and
+        // must be counted to keep NAV continuous across the offer lifecycle
+        // (post → partial fill → full fill → claim → cancel).
+        uint256 pendingAsset;
+        uint256 pendingOther;
+        uint256 escrowAsset;
+        uint256 escrowOther;
+        if (reserveHook != address(0)) {
+            IReserveHook h = IReserveHook(reserveHook);
+            Currency cAsset = Currency.wrap(asset());
+            pendingAsset = h.proceedsOwed(address(this), cAsset);
+            escrowAsset = h.escrowedReserve(address(this), cAsset);
+            if (otherAddr != address(0)) {
+                Currency cOther = Currency.wrap(otherAddr);
+                pendingOther = h.proceedsOwed(address(this), cOther);
+                escrowOther = h.escrowedReserve(address(this), cOther);
+            }
+        }
+
         if (assetIsToken0) {
-            uint256 otherTotal = amt1 + idleOther;
+            uint256 otherTotal = amt1 + idleOther + pendingOther + escrowOther;
             uint256 otherInAsset = _quoteToken1ToToken0(otherTotal, uint256(sqrtPriceX96));
-            return idleAsset + amt0 + otherInAsset;
+            return idleAsset + pendingAsset + escrowAsset + amt0 + otherInAsset;
         } else {
-            uint256 otherTotal = amt0 + idleOther;
+            uint256 otherTotal = amt0 + idleOther + pendingOther + escrowOther;
             uint256 otherInAsset = _quoteToken0ToToken1(otherTotal, uint256(sqrtPriceX96));
-            return idleAsset + amt1 + otherInAsset;
+            return idleAsset + pendingAsset + escrowAsset + amt1 + otherInAsset;
         }
     }
 
@@ -206,6 +237,7 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     function deposit(uint256 assets, address receiver) public override nonReentrant whenNotPaused returns (uint256) {
         require(assets >= MIN_DEPOSIT, "MIN_DEPOSIT");
         require(_poolKeySet, "POOL_KEY_NOT_SET");
+        _pullReserveProceedsBoth();
         if (maxTVL > 0) require(totalAssets() + assets <= maxTVL, "TVL_CAP");
         if (balanceOf(receiver) == 0) totalDepositors++;
 
@@ -223,6 +255,7 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         returns (uint256 assets)
     {
         require(_poolKeySet, "POOL_KEY_NOT_SET");
+        _pullReserveProceedsBoth();
         assets = previewMint(shares);
         require(assets >= MIN_DEPOSIT, "MIN_DEPOSIT");
         if (maxTVL > 0) require(totalAssets() + assets <= maxTVL, "TVL_CAP");
@@ -250,6 +283,7 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         require(assets >= MIN_DEPOSIT, "MIN_DEPOSIT");
         require(_poolKeySet, "POOL_KEY_NOT_SET");
         require(assetsToSwap <= assets, "SWAP_TOO_LARGE");
+        _pullReserveProceedsBoth();
         if (maxTVL > 0) require(totalAssets() + assets <= maxTVL, "TVL_CAP");
 
         // Snapshot BEFORE pulling assets so existing-LP NAV is the baseline.
@@ -297,6 +331,7 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         whenNotPaused
         returns (uint256 shares)
     {
+        _pullReserveProceedsBoth();
         shares = previewWithdraw(assets);
         _prepareWithdraw(assets);
         require(IERC20(asset()).balanceOf(address(this)) >= assets, "INSUFFICIENT_ASSET_USE_ZAP");
@@ -311,6 +346,7 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         whenNotPaused
         returns (uint256 assets)
     {
+        _pullReserveProceedsBoth();
         assets = previewRedeem(shares);
         _prepareWithdraw(assets);
         require(IERC20(asset()).balanceOf(address(this)) >= assets, "INSUFFICIENT_ASSET_USE_ZAP");
@@ -326,6 +362,7 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         uint256 minAssetOut,
         uint256 deadline
     ) external nonReentrant whenNotPaused returns (uint256 shares) {
+        _pullReserveProceedsBoth();
         shares = previewWithdraw(assets);
         _prepareWithdraw(assets);
         _swapOtherForAssetIfNeeded(assets, otherToSwap, minAssetOut, deadline);
@@ -342,6 +379,7 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         uint256 minAssetOut,
         uint256 deadline
     ) external nonReentrant whenNotPaused returns (uint256 assets) {
+        _pullReserveProceedsBoth();
         assets = previewRedeem(shares);
         _prepareWithdraw(assets);
         _swapOtherForAssetIfNeeded(assets, otherToSwap, minAssetOut, deadline);
@@ -544,6 +582,15 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
 
     function setPoolKey(PoolKey calldata _poolKey) external onlyOwner {
         require(!_poolKeySet, "ALREADY_SET");
+        // Reject native-ETH pools. Vault, hook and zap adapter all assume
+        // ERC-20 currencies (forceApprove, transferFrom, balanceOf). Native
+        // support is a separate, larger feature — fail closed here so a
+        // misconfiguration cannot brick the vault silently.
+        require(
+            Currency.unwrap(_poolKey.currency0) != address(0)
+                && Currency.unwrap(_poolKey.currency1) != address(0),
+            "NATIVE_NOT_SUPPORTED"
+        );
         bool _isToken0 = Currency.unwrap(_poolKey.currency0) == asset();
         require(_isToken0 || Currency.unwrap(_poolKey.currency1) == asset(), "ASSET_NOT_IN_POOL");
         poolKey = _poolKey;
@@ -568,6 +615,22 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         tickLower = newTickLower;
         tickUpper = newTickUpper;
         _deployBalancedLiquidity(minLiquidity);
+        emit Rebalanced(newTickLower, newTickUpper);
+    }
+
+    /// @notice Configure the initial tick band before any liquidity is deployed.
+    /// @dev    Cheap pre-launch knob. Reverts after first deposit so that an
+    ///         active position cannot be silently moved without going through
+    ///         the full {rebalance} (remove → redeploy) flow.
+    function setInitialTicks(int24 newTickLower, int24 newTickUpper) external onlyOwner {
+        require(_poolKeySet, "POOL_KEY_NOT_SET");
+        require(totalLiquidityDeployed == 0 && positionTokenId == 0, "POSITION_LIVE");
+        require(newTickLower < newTickUpper, "INVALID_TICKS");
+        int24 spacing = poolKey.tickSpacing;
+        require(newTickLower % spacing == 0 && newTickUpper % spacing == 0, "TICK_NOT_ALIGNED");
+        require(newTickLower >= TickMath.MIN_TICK && newTickUpper <= TickMath.MAX_TICK, "TICK_OUT_OF_BOUNDS");
+        tickLower = newTickLower;
+        tickUpper = newTickUpper;
         emit Rebalanced(newTickLower, newTickUpper);
     }
 
@@ -620,6 +683,54 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         if (amount > 0) emit ReserveProceedsCollected(Currency.unwrap(currency), amount);
     }
 
+    /// @notice Atomic offer rotation: cancel-existing → claim both proceeds →
+    ///         repost at the new size and price. One tx replaces three;
+    ///         removes the "operator forgot to collectReserveProceeds" footgun.
+    /// @param  sellCurrency must be one of the pool currencies.
+    /// @param  newSellAmount inventory to lock in the fresh offer.
+    /// @param  newSqrtPriceX96 vault's new sale sqrt-price.
+    /// @param  expiry unix seconds; 0 disables expiry.
+    function rebalanceOffer(
+        Currency sellCurrency,
+        uint128 newSellAmount,
+        uint160 newSqrtPriceX96,
+        uint64 expiry
+    ) external onlyOwner nonReentrant {
+        require(_poolKeySet, "POOL_KEY_NOT_SET");
+        require(reserveHook != address(0), "HOOK_NOT_SET");
+        require(newSellAmount > 0, "ZERO_AMOUNT");
+
+        IReserveHook h = IReserveHook(reserveHook);
+
+        // 1) Cancel any existing offer behind an explicit `offerActive` view
+        //    gate. Previous version used `try/catch` which silently swallowed
+        //    real failures (wrong pool key, paused hook, accounting bug)
+        //    and would then post on top of broken state. With the gate,
+        //    only the "no offer" branch is skipped; real cancel reverts
+        //    bubble up and abort the rotation.
+        if (h.offerActive(poolKey)) {
+            uint128 returned = h.cancelReserveOffer(poolKey);
+            if (returned > 0) emit ReserveOfferReturned(Currency.unwrap(sellCurrency), returned);
+        }
+
+        // 2) Claim any proceeds the hook is still holding for this vault, in
+        //    BOTH currencies. Either or both may be zero.
+        Currency c0 = poolKey.currency0;
+        Currency c1 = poolKey.currency1;
+        uint256 a0 = h.claimReserveProceeds(c0);
+        if (a0 > 0) emit ReserveProceedsCollected(Currency.unwrap(c0), a0);
+        uint256 a1 = h.claimReserveProceeds(c1);
+        if (a1 > 0) emit ReserveProceedsCollected(Currency.unwrap(c1), a1);
+
+        // 3) Post the fresh offer.
+        IERC20 tok = IERC20(Currency.unwrap(sellCurrency));
+        tok.forceApprove(reserveHook, 0);
+        tok.forceApprove(reserveHook, newSellAmount);
+        h.createReserveOffer(poolKey, sellCurrency, newSellAmount, newSqrtPriceX96, expiry);
+        tok.forceApprove(reserveHook, 0);
+        emit ReserveOfferEscrowed(Currency.unwrap(sellCurrency), newSellAmount, newSqrtPriceX96, expiry);
+    }
+
     function setTreasury(address newTreasury) external onlyOwner {
         require(newTreasury != address(0), "ZERO_ADDRESS");
         emit TreasuryUpdated(treasury, newTreasury);
@@ -638,7 +749,9 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     function setRemoveLiquiditySlippageBps(uint256 newBps) external onlyOwner {
-        require(newBps <= 1_000, "SLIPPAGE_TOO_HIGH");
+        // Hard cap at 1% (100 bps). Withdraw paths must not silently eat more
+        // than 1% of NAV due to position-removal slippage; depositors trust this.
+        require(newBps <= 100, "SLIPPAGE_TOO_HIGH");
         emit RemoveLiquiditySlippageBpsUpdated(removeLiquiditySlippageBps, newBps);
         removeLiquiditySlippageBps = newBps;
     }
@@ -655,5 +768,24 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     function _otherToken() internal view returns (address) {
         if (!_poolKeySet) return address(0);
         return assetIsToken0 ? Currency.unwrap(poolKey.currency1) : Currency.unwrap(poolKey.currency0);
+    }
+
+    /// @notice Pull every claimable reserve-sale proceed from the hook into the
+    ///         vault before any share-math runs. This guarantees `totalAssets()`
+    ///         reflects already-realised proceeds physically, not just as a
+    ///         pending reading. Called from deposit/mint/withdraw/redeem.
+    function _pullReserveProceedsBoth() internal {
+        if (reserveHook == address(0) || !_poolKeySet) return;
+        IReserveHook h = IReserveHook(reserveHook);
+        Currency c0 = poolKey.currency0;
+        Currency c1 = poolKey.currency1;
+        if (h.proceedsOwed(address(this), c0) > 0) {
+            uint256 a0 = h.claimReserveProceeds(c0);
+            if (a0 > 0) emit ReserveProceedsCollected(Currency.unwrap(c0), a0);
+        }
+        if (h.proceedsOwed(address(this), c1) > 0) {
+            uint256 a1 = h.claimReserveProceeds(c1);
+            if (a1 > 0) emit ReserveProceedsCollected(Currency.unwrap(c1), a1);
+        }
     }
 }

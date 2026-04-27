@@ -15,12 +15,12 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {BalanceDelta, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 
-import {DynamicFeeHook} from "../src/DynamicFeeHook.sol";
+import {DynamicFeeHook} from "../../src/archive-v1/DynamicFeeHook.sol";
 
-import {MockERC20} from "./mocks/MockERC20.sol";
-import {MockPoolManager} from "./mocks/MockPoolManager.sol";
-import {MockFeeDistributor} from "./mocks/MockFeeDistributor.sol";
-import {HookMiner} from "./utils/HookMiner.sol";
+import {MockERC20} from "../mocks/MockERC20.sol";
+import {MockPoolManager} from "../mocks/MockPoolManager.sol";
+import {MockFeeDistributor} from "../mocks/MockFeeDistributor.sol";
+import {HookMiner} from "../utils/HookMiner.sol";
 
 contract PoC_FeeUnitMismatch is Test {
     DynamicFeeHook hook;
