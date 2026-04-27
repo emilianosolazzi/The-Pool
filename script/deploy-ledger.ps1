@@ -106,7 +106,11 @@ $forgeArgs = @(
     "--verify",
     "--etherscan-api-key", $esKey,
     "--verifier-url", $esUrl,
-    "--slow"
+    "--slow",
+    # DynamicFeeHookV2 runtime bytecode is ~29 KB. Forge defaults to EIP-170
+    # (24 KB) and will abort the broadcast otherwise. Arbitrum One accepts
+    # the larger size (verified on V1 deploy).
+    "--disable-code-size-limit"
 )
 
 Write-Host ""

@@ -25,6 +25,23 @@ interface IFeeDistributorV2 {
     function distribute(Currency currency, uint256 amount) external;
 }
 
+/// @notice Pricing mode for a reserve offer.
+///         PRICE_IMPROVEMENT — vault prices its inventory BETTER than the
+///         pool for the swapper (execution improvement). Fill-gate only
+///         passes when the AMM marginal price is at-or-worse than the
+///         vault's quote — i.e. the swapper would be hurt by routing
+///         through the AMM.
+///         VAULT_SPREAD — vault prices its inventory WORSE than the pool
+///         for the swapper (LP earns spread). Fill-gate only passes when
+///         the AMM marginal price is at-or-better than the vault's quote
+///         — i.e. the vault is monetising the spread between the AMM
+///         spot and its own quote, harvesting flow that would otherwise
+///         have gone through the AMM at a price closer to mid.
+enum ReservePricingMode {
+    PRICE_IMPROVEMENT,
+    VAULT_SPREAD
+}
+
 /// @title  DynamicFeeHookV2
 /// @notice V1 dynamic-fee hook + per-pool reserve-sale (limit-order) fills.
 /// @dev    Reserve sale lets a registered vault offer single-sided inventory
@@ -86,6 +103,7 @@ contract DynamicFeeHookV2 is BaseHook, Ownable2Step, ReentrancyGuard {
         uint64  expiry;                 // unix seconds; 0 = no expiry
         bool    sellingCurrency1;       // true if sellCurrency == key.currency1, else currency0
         bool    active;
+        ReservePricingMode pricingMode; // PRICE_IMPROVEMENT (default) or VAULT_SPREAD
     }
 
     mapping(PoolId => ReserveOffer) public offers;
@@ -126,6 +144,11 @@ contract DynamicFeeHookV2 is BaseHook, Ownable2Step, ReentrancyGuard {
         uint160 vaultSqrtPriceX96,
         uint64 expiry
     );
+    /// @notice Companion event so off-chain consumers can read the pricing
+    ///         mode of a freshly-created offer without ABI-breaking the
+    ///         original `ReserveOfferCreated` shape. Always emitted right
+    ///         after `ReserveOfferCreated`.
+    event ReserveOfferMode(bytes32 indexed poolId, address indexed vault, ReservePricingMode mode);
     event ReserveOfferCancelled(bytes32 indexed poolId, address indexed vault, uint128 returnedAmount);
     event ReserveFilled(
         bytes32 indexed poolId,
@@ -219,6 +242,34 @@ contract DynamicFeeHookV2 is BaseHook, Ownable2Step, ReentrancyGuard {
         uint160 vaultSqrtPriceX96,
         uint64 expiry
     ) external nonReentrant {
+        // Backward-compatible default: existing callers get PRICE_IMPROVEMENT.
+        _createReserveOffer(key, sellCurrency, sellAmount, vaultSqrtPriceX96, expiry, ReservePricingMode.PRICE_IMPROVEMENT);
+    }
+
+    /// @notice Mode-aware reserve-offer creation. Mirrors `createReserveOffer`
+    ///         but lets the vault pick PRICE_IMPROVEMENT (existing behaviour:
+    ///         vault quotes better than pool, swapper benefits) or
+    ///         VAULT_SPREAD (vault quotes worse than pool, vault earns the
+    ///         spread).
+    function createReserveOfferWithMode(
+        PoolKey calldata key,
+        Currency sellCurrency,
+        uint128 sellAmount,
+        uint160 vaultSqrtPriceX96,
+        uint64 expiry,
+        ReservePricingMode mode
+    ) external nonReentrant {
+        _createReserveOffer(key, sellCurrency, sellAmount, vaultSqrtPriceX96, expiry, mode);
+    }
+
+    function _createReserveOffer(
+        PoolKey calldata key,
+        Currency sellCurrency,
+        uint128 sellAmount,
+        uint160 vaultSqrtPriceX96,
+        uint64 expiry,
+        ReservePricingMode mode
+    ) internal {
         PoolId pid = key.toId();
         if (registeredVault[pid] != msg.sender) revert NotRegisteredVault();
         if (sellAmount == 0 || vaultSqrtPriceX96 == 0) revert InvalidOffer();
@@ -258,13 +309,15 @@ contract DynamicFeeHookV2 is BaseHook, Ownable2Step, ReentrancyGuard {
             vaultSqrtPriceX96: vaultSqrtPriceX96,
             expiry: expiry,
             sellingCurrency1: sellsCurrency1,
-            active: true
+            active: true,
+            pricingMode: mode
         });
         escrowedReserve[msg.sender][sellCurrency] += sellAmount;
 
         emit ReserveOfferCreated(
             PoolId.unwrap(pid), msg.sender, Currency.unwrap(sellCurrency), sellAmount, vaultSqrtPriceX96, expiry
         );
+        emit ReserveOfferMode(PoolId.unwrap(pid), msg.sender, mode);
     }
 
     /// @notice Cancel an active offer; remaining inventory returns to vault.
@@ -358,20 +411,34 @@ contract DynamicFeeHookV2 is BaseHook, Ownable2Step, ReentrancyGuard {
         (uint160 poolSqrtP,,,) = poolManager.getSlot0(pid);
         if (poolSqrtP == 0) return BeforeSwapDeltaLibrary.ZERO_DELTA;
 
-        // Price gate: only fill when offer is at-or-better than AMM for swapper.
-        // - selling currency1 (zeroForOne): need poolSqrtP <= vaultSqrtP
-        //   (vault gives more token1 per token0 than AMM -> swapper benefits).
-        // - selling currency0 (oneForZero): need poolSqrtP >= vaultSqrtP.
-        if (o.sellingCurrency1) {
-            if (poolSqrtP > o.vaultSqrtPriceX96) {
-                _maybeEmitStale(pid, poolSqrtP, o.vaultSqrtPriceX96);
-                return BeforeSwapDeltaLibrary.ZERO_DELTA;
-            }
+        // Price gate. Two intents, two gate orientations:
+        //
+        //  PRICE_IMPROVEMENT (existing): vault quote is at-or-better than AMM
+        //    for the swapper. Fill only when AMM is at-or-worse than vault.
+        //    - selling currency1 (zeroForOne): poolSqrtP <= vaultSqrtP
+        //      (vault gives MORE token1 per token0 than AMM -> swapper wins)
+        //    - selling currency0 (oneForZero): poolSqrtP >= vaultSqrtP
+        //
+        //  VAULT_SPREAD (new): vault quote is at-or-worse than AMM for the
+        //    swapper. Vault monetises the spread on flow that would have
+        //    cleared on the AMM at a tighter price. Fill only when AMM is
+        //    at-or-better than vault.
+        //    - selling currency1 (zeroForOne): poolSqrtP >= vaultSqrtP
+        //    - selling currency0 (oneForZero): poolSqrtP <= vaultSqrtP
+        bool gatePass;
+        if (o.pricingMode == ReservePricingMode.PRICE_IMPROVEMENT) {
+            gatePass = o.sellingCurrency1
+                ? (poolSqrtP <= o.vaultSqrtPriceX96)
+                : (poolSqrtP >= o.vaultSqrtPriceX96);
         } else {
-            if (poolSqrtP < o.vaultSqrtPriceX96) {
-                _maybeEmitStale(pid, poolSqrtP, o.vaultSqrtPriceX96);
-                return BeforeSwapDeltaLibrary.ZERO_DELTA;
-            }
+            // VAULT_SPREAD
+            gatePass = o.sellingCurrency1
+                ? (poolSqrtP >= o.vaultSqrtPriceX96)
+                : (poolSqrtP <= o.vaultSqrtPriceX96);
+        }
+        if (!gatePass) {
+            _maybeEmitStale(pid, poolSqrtP, o.vaultSqrtPriceX96);
+            return BeforeSwapDeltaLibrary.ZERO_DELTA;
         }
 
         uint256 maxInput = uint256(-params.amountSpecified);

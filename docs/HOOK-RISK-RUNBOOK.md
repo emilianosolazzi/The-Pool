@@ -229,6 +229,63 @@ to the vault (`proceedsOwed`) survive cancellation; claim them with
 | `hook.totalReserveSold` | unbounded growth | sanity-check against ghost expectation |
 | Custom: hook ERC20 balance vs. `escrow + proceeds` | balance < escrow + proceeds | **never expected**; would indicate a conservation-invariant break — page immediately |
 
+### 3.4 Reserve offer pricing-mode policy
+
+`DynamicFeeHookV2` supports two reserve-offer pricing modes
+(`ReservePricingMode`):
+
+- `PRICE_IMPROVEMENT` — vault quotes **better than** AMM mid; the swapper
+  receives the surplus. Used for promotional / execution-improvement
+  inventory and for any flow where the protocol intentionally subsidises
+  swappers.
+- `VAULT_SPREAD` — vault quotes **worse than** AMM mid; the vault
+  captures the spread vs. AMM mid as additional NAV. This is the
+  intended steady-state mode for LP-yield inventory.
+
+**Production policy (operator default).** For LP-yield inventory the
+operator MUST post offers via the mode-aware entry points:
+
+- `vault.offerReserveToHookWithMode(sellCurrency, sellAmount, vaultSqrtPriceX96, expiry, ReservePricingMode.VAULT_SPREAD)`
+- `vault.rebalanceOfferWithMode(sellCurrency, newSellAmount, newSqrtPriceX96, expiry, ReservePricingMode.VAULT_SPREAD)`
+
+The legacy no-mode functions (`offerReserveToHook`, `rebalanceOffer`)
+are preserved for ABI backward compatibility and **default to
+`PRICE_IMPROVEMENT`**. They MUST NOT be used for steady-state LP-yield
+inventory; reserve their use for explicit price-improvement /
+promotional inventory only.
+
+> The default was intentionally **not** flipped at the contract level.
+> Flipping the legacy default would silently change the economic
+> meaning of every existing integration that calls
+> `offerReserveToHook(...)`. Operator selection at the call site is
+> safer than a contract-level default change.
+
+`vaultSqrtPriceX96` for `VAULT_SPREAD`:
+
+| sellCurrency | gate (offer fills when…) | suggested sqrtP |
+|--------------|--------------------------|-----------------|
+| `currency1` (e.g. USDC) | `poolSqrtP >= vaultSqrtP` | `poolSqrtP * (1 - spread/2)` |
+| `currency0` (e.g. WETH) | `poolSqrtP <= vaultSqrtP` | `poolSqrtP * (1 + spread/2)` |
+
+Typical spreads: 10–100 bps. Wider spreads earn more per fill but fill
+less often. Keepers should re-post (`rebalanceOfferWithMode`) when
+`getOfferHealth(...).driftBps` exceeds the operator's drift band
+(e.g. 50 bps). A reference TypeScript keeper lives at
+[`scripts/keeper/reserveKeeper.ts`](../scripts/keeper/reserveKeeper.ts);
+it requires the keeper key to be the vault `owner()` because both
+`offerReserveToHookWithMode` and `rebalanceOfferWithMode` are
+`onlyOwner`.
+
+> **Profitability guard caveat.** The keeper's gas-vs-spread
+> profitability guard is **disabled when `ASSET_PER_NATIVE_E18=0`** (the
+> default). During canary, the keeper may post small offers that are
+> not gas-economic in isolation — this is expected. Enable the guard
+> after ETH/asset pricing is wired (oracle or manually configured
+> daily snapshot) by setting `ASSET_PER_NATIVE_E18` to the
+> asset-units-per-1e18-wei-native rate; combine with
+> `GAS_SAFETY_MULTIPLIER=3` so the keeper only posts when
+> `expectedSpreadProfit >= 3 * gasCost`.
+
 ---
 
 ## 4. Audit-readiness summary

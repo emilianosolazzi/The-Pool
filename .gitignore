@@ -9,3 +9,6 @@ broadcast/
 # Local AI/agent working notes — not for the public repo
 .copilot/
 
+
+fork-*.log
+node_modules/

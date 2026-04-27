@@ -22,6 +22,7 @@ import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionMa
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 import {IZapRouter} from "./interfaces/IZapRouter.sol";
+import {ReservePricingMode} from "./DynamicFeeHookV2.sol";
 
 interface IReserveHook {
     function createReserveOffer(
@@ -30,6 +31,14 @@ interface IReserveHook {
         uint128 sellAmount,
         uint160 vaultSqrtPriceX96,
         uint64 expiry
+    ) external;
+    function createReserveOfferWithMode(
+        PoolKey calldata key,
+        Currency sellCurrency,
+        uint128 sellAmount,
+        uint160 vaultSqrtPriceX96,
+        uint64 expiry,
+        ReservePricingMode mode
     ) external;
     function cancelReserveOffer(PoolKey calldata key) external returns (uint128);
     function claimReserveProceeds(Currency currency) external returns (uint256);
@@ -898,13 +907,45 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         uint160 vaultSqrtPriceX96,
         uint64 expiry
     ) external onlyOwner nonReentrant {
+        _offerReserveToHook(sellCurrency, sellAmount, vaultSqrtPriceX96, expiry, ReservePricingMode.PRICE_IMPROVEMENT, false);
+    }
+
+    /// @notice Mode-aware variant of {offerReserveToHook}. Picks PRICE_IMPROVEMENT
+    ///         (swapper-favouring; existing default) or VAULT_SPREAD (vault
+    ///         monetises spread on flow). All other semantics identical.
+    function offerReserveToHookWithMode(
+        Currency sellCurrency,
+        uint128 sellAmount,
+        uint160 vaultSqrtPriceX96,
+        uint64 expiry,
+        ReservePricingMode mode
+    ) external onlyOwner nonReentrant {
+        _offerReserveToHook(sellCurrency, sellAmount, vaultSqrtPriceX96, expiry, mode, true);
+    }
+
+    function _offerReserveToHook(
+        Currency sellCurrency,
+        uint128 sellAmount,
+        uint160 vaultSqrtPriceX96,
+        uint64 expiry,
+        ReservePricingMode mode,
+        bool useMode
+    ) internal {
         require(_poolKeySet, "POOL_KEY_NOT_SET");
         require(reserveHook != address(0), "HOOK_NOT_SET");
         require(sellAmount > 0, "ZERO_AMOUNT");
         IERC20 tok = IERC20(Currency.unwrap(sellCurrency));
         tok.forceApprove(reserveHook, 0);
         tok.forceApprove(reserveHook, sellAmount);
-        IReserveHook(reserveHook).createReserveOffer(poolKey, sellCurrency, sellAmount, vaultSqrtPriceX96, expiry);
+        if (useMode) {
+            IReserveHook(reserveHook).createReserveOfferWithMode(
+                poolKey, sellCurrency, sellAmount, vaultSqrtPriceX96, expiry, mode
+            );
+        } else {
+            IReserveHook(reserveHook).createReserveOffer(
+                poolKey, sellCurrency, sellAmount, vaultSqrtPriceX96, expiry
+            );
+        }
         tok.forceApprove(reserveHook, 0);
         emit ReserveOfferEscrowed(Currency.unwrap(sellCurrency), sellAmount, vaultSqrtPriceX96, expiry);
     }
@@ -936,6 +977,29 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         uint160 newSqrtPriceX96,
         uint64 expiry
     ) external onlyOwner nonReentrant {
+        _rebalanceOffer(sellCurrency, newSellAmount, newSqrtPriceX96, expiry, ReservePricingMode.PRICE_IMPROVEMENT, false);
+    }
+
+    /// @notice Mode-aware variant of {rebalanceOffer}. Reposts the fresh offer
+    ///         under the chosen pricing mode (PRICE_IMPROVEMENT or VAULT_SPREAD).
+    function rebalanceOfferWithMode(
+        Currency sellCurrency,
+        uint128 newSellAmount,
+        uint160 newSqrtPriceX96,
+        uint64 expiry,
+        ReservePricingMode mode
+    ) external onlyOwner nonReentrant {
+        _rebalanceOffer(sellCurrency, newSellAmount, newSqrtPriceX96, expiry, mode, true);
+    }
+
+    function _rebalanceOffer(
+        Currency sellCurrency,
+        uint128 newSellAmount,
+        uint160 newSqrtPriceX96,
+        uint64 expiry,
+        ReservePricingMode mode,
+        bool useMode
+    ) internal {
         require(_poolKeySet, "POOL_KEY_NOT_SET");
         require(reserveHook != address(0), "HOOK_NOT_SET");
         require(newSellAmount > 0, "ZERO_AMOUNT");
@@ -966,7 +1030,11 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         IERC20 tok = IERC20(Currency.unwrap(sellCurrency));
         tok.forceApprove(reserveHook, 0);
         tok.forceApprove(reserveHook, newSellAmount);
-        h.createReserveOffer(poolKey, sellCurrency, newSellAmount, newSqrtPriceX96, expiry);
+        if (useMode) {
+            h.createReserveOfferWithMode(poolKey, sellCurrency, newSellAmount, newSqrtPriceX96, expiry, mode);
+        } else {
+            h.createReserveOffer(poolKey, sellCurrency, newSellAmount, newSqrtPriceX96, expiry);
+        }
         tok.forceApprove(reserveHook, 0);
         emit ReserveOfferEscrowed(Currency.unwrap(sellCurrency), newSellAmount, newSqrtPriceX96, expiry);
     }
