@@ -153,6 +153,8 @@ The deploy script mines a valid hook address (CREATE2 with permission bits), dep
 | DynamicFeeHook | `0x62076C1Cb0Ea57Acd2353fF45226a1FB1e6100c4` |
 | BootstrapRewards | `0x2f9Ba00A0AA3533874294c55144a30Bf6a7b7a63` |
 
+> The tick range above documents the **source defaults** in [`LiquidityVault`](src/LiquidityVault.sol). The live vault has been operationally `rebalance()`d since deployment and may sit at a different tick-spacing-aligned range. Read `tickLower` / `tickUpper` from the deployed contract for the current live corridor.
+
 Bootstrap activation txs:
 - Deploy BootstrapRewards: `0xc2eaece0e89b2489b6ca4836935be14efc6d40d3e44ec72fe23363ed24a7b2e3`
 - Wire `FeeDistributor.treasury` to BootstrapRewards: `0xbcf1c27ecc1c63bef350e2d3eef98b0540d4495ea33254c6fd61eb07a2644722`
@@ -190,13 +192,15 @@ All critical paths have been reviewed with emphasis on correctness, arithmetic p
 | Stateful invariants | 4 | 256 runs × depth 15 |
 | **Total** | **137** | **0 failures** |
 
-### External Audit: Complete
+### Automated Audit: Complete
 
-Independent third-party audit by **TSI Audit Scanner** completed **2026-04-25** against commit `22894ce`. All findings (2 High, 1 Medium, 1 Medium defense-in-depth, 3 Low, plus informational items) were remediated before the report was finalized — the published verdict is **PASSED**.
+Pre-audited with **TSI Audit Scanner** — an open-source temporal-state-inconsistency static analysis tool — completed **2026-04-25** against commit `22894ce`. All findings (2 High, 1 Medium, 1 Medium defense-in-depth, 3 Low, plus informational items) were remediated before the report was finalized — the published verdict is **PASSED**.
 
 Full report: [audits/the-pool_audit_2026-04-25.md](audits/the-pool_audit_2026-04-25.md).
 
-A second external audit is scheduled at $100K TVL. The system is independently built and self-funded. Security spend is tied to capital at risk — not optics.
+> **Disclosure:** TSI Audit Scanner is an in-house static analysis tool, not an arm's-length third-party firm. It complements but does not replace human review.
+
+A first review by an **independent third-party human auditor** is scheduled at \$100K TVL. The system is independently built and self-funded. Security spend is tied to capital at risk — not optics.
 
 ### Verification
 
