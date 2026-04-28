@@ -407,14 +407,16 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
               <Toggle
                 active={side === 'sell1'}
                 onClick={() => setSide('sell1')}
-                title={`Sell ${symbol1}`}
-                sub="zeroForOne fills"
+                title={`Sell ${symbol1} → ${symbol0}`}
+                sub={`Vault sells ${symbol1} for ${symbol0}. Fills on ${symbol0} → ${symbol1} swaps.`}
+                tech="zeroForOne fills"
               />
               <Toggle
                 active={side === 'sell0'}
                 onClick={() => setSide('sell0')}
-                title={`Sell ${symbol0}`}
-                sub="oneForZero fills"
+                title={`Sell ${symbol0} → ${symbol1}`}
+                sub={`Vault sells ${symbol0} for ${symbol1}. Fills on ${symbol1} → ${symbol0} swaps.`}
+                tech="oneForZero fills"
               />
             </div>
 
@@ -671,11 +673,13 @@ function Toggle({
   onClick,
   title,
   sub,
+  tech,
 }: {
   active: boolean;
   onClick: () => void;
   title: string;
   sub: string;
+  tech?: string;
 }) {
   return (
     <button
@@ -688,7 +692,12 @@ function Toggle({
       }`}
     >
       <div className="font-semibold">{title}</div>
-      <div className="mt-0.5 text-xs text-zinc-500">{sub}</div>
+      <div className="mt-0.5 text-xs text-zinc-300/80">{sub}</div>
+      {tech && (
+        <div className="mt-1 font-mono text-[10px] uppercase tracking-wide text-zinc-500">
+          {tech}
+        </div>
+      )}
     </button>
   );
 }
