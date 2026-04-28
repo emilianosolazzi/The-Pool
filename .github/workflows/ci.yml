@@ -52,8 +52,14 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
+      # Use `npm install` rather than `npm ci`: the lockfile pulls in a
+       # transitive picomatch via two paths (top-level v2.3.2 + nested v4.0.4
+      # under eslint-import-resolver-typescript -> tinyglobby -> fdir).
+      # `npm ci` on the npm 10 shipped with Node 20 rejects this drift, while
+      # `npm install --no-audit --no-fund` accepts it without mutating the
+      # tree in any way that affects typecheck/build.
       - name: Install dependencies
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Typecheck
         run: npm run typecheck
