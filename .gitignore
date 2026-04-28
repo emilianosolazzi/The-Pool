@@ -5,3 +5,18 @@ broadcast/
 
 .vercel
 .env*.local
+
+# Local AI/agent working notes — not for the public repo
+.copilot/
+
+
+fork-*.log
+node_modules/
+
+# build/run logs
+bootstrap-deploy.log
+forge-build.log
+keeper-dry.log
+nextbuild.log
+fork-e2e.log
+.env.bak.*

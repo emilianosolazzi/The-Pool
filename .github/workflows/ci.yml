@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: forge build + test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Show forge version
+        run: forge --version
+
+      - name: forge build
+        run: forge build --sizes
+
+      # Runs the full repo suite (unit + integration + deterministic
+      # reserve-fill conservation invariants in test/ReserveFillInvariants.t.sol
+      # + handler-driven fuzz invariants in test/ReserveFillFuzzInvariants.t.sol).
+      # `--no-match-contract Fork` excludes the Arbitrum fork suites
+      # (`ForkTest`, `LiquidityVaultV2ForkTest`) which require ARBITRUM_RPC_URL.
+      - name: forge test
+        run: forge test --no-match-contract Fork -vvv
+
+  web:
+    name: web typecheck + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # Use `npm install` rather than `npm ci`: the lockfile pulls in a
+       # transitive picomatch via two paths (top-level v2.3.2 + nested v4.0.4
+      # under eslint-import-resolver-typescript -> tinyglobby -> fdir).
+      # `npm ci` on the npm 10 shipped with Node 20 rejects this drift, while
+      # `npm install --no-audit --no-fund` accepts it without mutating the
+      # tree in any way that affects typecheck/build.
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        env:
+          # providers.tsx throws at module-init if this is missing. CI just
+          # needs the bundle to compile; runtime uses the real Vercel value.
+          NEXT_PUBLIC_WC_PROJECT_ID: ci-placeholder
+        run: npm run build

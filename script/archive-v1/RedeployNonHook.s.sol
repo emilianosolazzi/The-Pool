@@ -11,9 +11,9 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {FeeDistributor} from "../src/FeeDistributor.sol";
-import {LiquidityVault} from "../src/LiquidityVault.sol";
-import {BootstrapRewards} from "../src/BootstrapRewards.sol";
+import {FeeDistributor} from "../../src/FeeDistributor.sol";
+import {LiquidityVault} from "../../src/archive-v1/LiquidityVault.sol";
+import {BootstrapRewards} from "../../src/BootstrapRewards.sol";
 
 /// @notice One-shot redeploy of FeeDistributor + LiquidityVault + BootstrapRewards,
 ///         init a fresh pool at the correct ETH price, repoint the EXISTING hook.

@@ -26,6 +26,7 @@ import { parseUnits, formatUnits, type Address } from 'viem';
 import {
   erc20Abi,
   vaultAbi,
+  lensAbi,
   universalRouterAbi,
   v4QuoterAbi,
   permit2Abi,
@@ -46,7 +47,7 @@ import {
   type SwapPlan,
 } from '@/lib/swap';
 
-const HOOK_FEE_BPS = 25n;          // DynamicFeeHook base hook fee
+const HOOK_FEE_BPS = 25n;          // DynamicFeeHookV2 base hook fee
 const TREASURY_SHARE_BPS = 2000n;  // FeeDistributor default 20%
 const LP_DONATION_BPS = 10_000n - TREASURY_SHARE_BPS;
 const SLIPPAGE_PRESETS = [10, 50, 100]; // 0.1% / 0.5% / 1.0%
@@ -64,15 +65,17 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
   const weth = infra?.weth;
   const hook = deployment.hook as Address | undefined;
   const vault = deployment.vault as Address | undefined;
+  const lens = deployment.lens as Address | undefined;
 
   const supported = Boolean(infra && chainId === arbitrum.id && usdc && weth && hook && vault);
 
-  // Direction: `inputIsUSDC` true = USDC -> WETH (zeroForOne=false because WETH=currency0)
-  // currency0 = WETH (lower address), currency1 = USDC.
+  // Direction toggle. The actual `zeroForOne` is derived below from the live
+  // PoolKey so the UI cannot disagree with the on-chain pool ordering.
   const [inputIsUSDC, setInputIsUSDC] = useState(true);
   const [amount, setAmount] = useState('');
   const [slippageBps, setSlippageBps] = useState(50);
   const [step, setStep] = useState<'idle' | 'approveErc20' | 'approvePermit2' | 'swap'>('idle');
+  const [planError, setPlanError] = useState<string | null>(null);
 
   // Resolve token addresses defensively so hooks can run unconditionally.
   // When `supported` is false we feed harmless zero-value reads through wagmi
@@ -85,24 +88,77 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
   const inputSymbol = inputIsUSDC ? 'USDC' : 'WETH';
   const outputSymbol = inputIsUSDC ? 'WETH' : 'USDC';
 
-  // currency0 < currency1 by sort. WETH (0x82af…) < USDC (0xaf88…), so:
-  //   USDC -> WETH means input=currency1 -> output=currency0  => zeroForOne=false
-  //   WETH -> USDC means input=currency0 -> output=currency1  => zeroForOne=true
-  const zeroForOne = !inputIsUSDC;
+  // ── Live PoolKey — single source of truth ──────────────────────────────
+  // Read the PoolKey straight from the deployed vault. This guarantees the
+  // frontend quotes/swaps against the SAME PoolKey the vault and hook own,
+  // even if `fee`, `tickSpacing`, or `hooks` ever change. Env-derived values
+  // are used only as a fallback before the vault has been configured.
+  const { data: livePoolKeyData } = useReadContract({
+    address: vault,
+    abi: vaultAbi,
+    functionName: 'poolKey',
+    chainId,
+    query: { enabled: supported && Boolean(vault), refetchInterval: 30_000 },
+  });
 
-  // Pool params must match the deployed pool key. The redeployed pool uses
-  // tickSpacing=60 (a fresh PoolKey distinct from the v3-style 0.05% pool that
-  // shares fee=500 / tickSpacing=10 on the same token pair).
-  const poolKey = useMemo(
-    () => ({
+  const livePoolKey = livePoolKeyData as
+    | {
+        currency0: Address;
+        currency1: Address;
+        fee: number;
+        tickSpacing: number;
+        hooks: Address;
+      }
+    | undefined;
+
+  const liveKeyValid =
+    !!livePoolKey &&
+    livePoolKey.currency0 !== ZERO &&
+    livePoolKey.currency1 !== ZERO &&
+    livePoolKey.hooks !== ZERO;
+
+  const poolKey = useMemo(() => {
+    if (liveKeyValid && livePoolKey) {
+      return {
+        currency0: livePoolKey.currency0,
+        currency1: livePoolKey.currency1,
+        fee: Number(livePoolKey.fee),
+        tickSpacing: Number(livePoolKey.tickSpacing),
+        hooks: livePoolKey.hooks,
+      };
+    }
+    // Fallback: env-derived. Used only before the vault sets its PoolKey.
+    return {
       currency0: weth ?? ZERO,
       currency1: usdc ?? ZERO,
       fee: 500,
       tickSpacing: 60,
       hooks: hook ?? ZERO,
-    }),
-    [weth, usdc, hook],
-  );
+    };
+  }, [liveKeyValid, livePoolKey, weth, usdc, hook]);
+
+  // Derive zeroForOne from the live PoolKey, not from the UI direction toggle.
+  // currency0 < currency1 by v4 invariant. zeroForOne = (input == currency0).
+  const lc = (a: Address) => a.toLowerCase();
+  const inputIsCurrency0 = lc(inputToken) === lc(poolKey.currency0);
+  const inputIsCurrency1 = lc(inputToken) === lc(poolKey.currency1);
+  const zeroForOne = inputIsCurrency0;
+
+  // Guardrail: if the selected swap tokens are not BOTH part of the pool, or
+  // both sides resolve to the same currency, the user is looking at a stale or
+  // misconfigured deployment. Surface as a plan error so the swap button stays
+  // disabled with a clear reason.
+  const outputIsCurrency0 = lc(outputToken) === lc(poolKey.currency0);
+  const outputIsCurrency1 = lc(outputToken) === lc(poolKey.currency1);
+  const currencyMismatch =
+    liveKeyValid &&
+    inputToken !== ZERO &&
+    outputToken !== ZERO &&
+    (
+      !(inputIsCurrency0 || inputIsCurrency1) ||
+      !(outputIsCurrency0 || outputIsCurrency1) ||
+      lc(inputToken) === lc(outputToken)
+    );
 
   const amountIn = useMemo(() => {
     if (!amount) return 0n;
@@ -124,7 +180,7 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
             { address: PERMIT2, abi: permit2Abi, functionName: 'allowance', args: [address, inputToken, infra.universalRouter], chainId },
             { address: vault, abi: vaultAbi, functionName: 'balanceOf', args: [address], chainId },
             { address: vault, abi: vaultAbi, functionName: 'totalSupply', chainId },
-            { address: vault, abi: vaultAbi, functionName: 'getVaultStats', chainId },
+            { address: lens ?? vault, abi: lensAbi, functionName: 'getVaultStats', args: [vault], chainId },
           ] as const)
         : [],
     query: { enabled: supported && Boolean(address), refetchInterval: 15_000 },
@@ -142,7 +198,9 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
   const lifetimeYield = vaultStats?.[4]; // yieldColl
 
   // ── Quote ─────────────────────────────────────────────────────────────────
-  const quoteEnabled = supported && amountIn > 0n;
+  // Only quote when both swap tokens are confirmed to live in the on-chain
+  // PoolKey. Quoting against a stale fallback key produces misleading numbers.
+  const quoteEnabled = supported && amountIn > 0n && liveKeyValid && !currencyMismatch;
   const { data: quoteSim, error: quoteErr } = useSimulateContract({
     address: infra?.v4Quoter,
     abi: v4QuoterAbi,
@@ -160,7 +218,13 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
   );
 
   // ── Yield attribution math ────────────────────────────────────────────────
-  const hookFee = (amountIn * HOOK_FEE_BPS) / 10_000n;
+  // DynamicFeeHookV2 fee basis is abs(unspecified delta). For exact-input quotes,
+  // we approximate that with quoted amountOut; fallback to amountIn pre-quote.
+  const feeBasisAmount = amountOut ?? amountIn;
+  const feeBasisDecimals = amountOut ? outputDecimals : inputDecimals;
+  const feeBasisSymbol = amountOut ? outputSymbol : inputSymbol;
+
+  const hookFee = (feeBasisAmount * HOOK_FEE_BPS) / 10_000n;
   const treasuryAmount = (hookFee * TREASURY_SHARE_BPS) / 10_000n;
   const lpDonation = hookFee - treasuryAmount;
   const userShareOfDonation =
@@ -227,7 +291,11 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
 
   const onSwap = () => {
     if (amountIn === 0n || minOut === 0n) return;
-    setStep('swap');
+    setPlanError(null);
+    if (currencyMismatch) {
+      setPlanError('SELECTED_TOKENS_NOT_IN_LIVE_POOL');
+      return;
+    }
     const plan: SwapPlan = {
       poolKey,
       zeroForOne,
@@ -236,7 +304,18 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
       currencyIn: inputToken,
       currencyOut: outputToken,
     };
-    const { commands, inputs } = encodeV4ExactInSingle(plan);
+    let commands: `0x${string}`;
+    let inputs: `0x${string}`[];
+    try {
+      // Throws on uint128 overflow, zero amount, mismatched zeroForOne, or
+      // tokens that aren't part of the pool. Prevents bad calldata from
+      // reaching Universal Router and reverting on-chain.
+      ({ commands, inputs } = encodeV4ExactInSingle(plan));
+    } catch (e) {
+      setPlanError(e instanceof Error ? e.message : 'INVALID_SWAP_PLAN');
+      return;
+    }
+    setStep('swap');
     writeContract({
       address: infra.universalRouter,
       abi: universalRouterAbi,
@@ -254,6 +333,7 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
   const flip = () => {
     setInputIsUSDC((v) => !v);
     setAmount('');
+    setPlanError(null);
   };
 
   const txAction = needsErc20Approve
@@ -262,18 +342,23 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
       ? { label: 'Approve Permit2 for Universal Router', onClick: onApprovePermit2 }
       : { label: `Swap ${inputSymbol} for ${outputSymbol}`, onClick: onSwap };
 
-  // Swap enablement is conservative: until the vault reports meaningful
-  // deployed assets, hook donate() can revert with NoLiquidityToReceiveFees().
-  // Single-sided USDC positions may also be intentionally out-of-range; in that
-  // state deposits count for vault/bonus accounting but do not create active
-  // swap depth at the current tick.
+  // Swap enablement is quote-driven: the V4Quoter is the authoritative
+  // signal that the live PoolKey can actually fill `amountIn`. `liqDeployed`
+  // is kept as informational context only — it is not a gate.
   const liqDeployed = vaultStats?.[3] ?? 0n;
-  const poolSeeded = liqDeployed > 1_000_000_000n; // 1e9 L threshold
+  const poolSeeded = liqDeployed > 1_000_000_000n; // info-only threshold
 
+  const noWallet = !address;
   const swapDisabled =
+    noWallet ||
+    !supported ||
+    !liveKeyValid ||
+    currencyMismatch ||
     amountIn === 0n ||
     !amountOut ||
-    !poolSeeded ||
+    amountOut === 0n ||
+    minOut === 0n ||
+    Boolean(planError) ||
     isPending ||
     isMining ||
     (inBalance !== undefined && amountIn > inBalance);
@@ -288,18 +373,40 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
           Routes through The-Pool&apos;s own Uniswap v4 PoolKey. 80% of every hook fee
           flows back to in-range LPs (including you, if you&apos;ve deposited).
         </p>
+        <p className="mt-2 text-xs text-zinc-500">
+          Swaps are trades. They do not mint vault shares; you receive the output token directly.
+        </p>
       </div>
 
       <div className="card p-5 md:p-6">
+        {currencyMismatch ? (
+          <div className="mb-4 rounded-xl border border-red-400/30 bg-red-500/5 p-3 text-xs text-red-200">
+            <div className="font-semibold text-red-100">Token / pool mismatch</div>
+            <div className="mt-1 text-red-200/80">
+              The selected tokens are not part of the vault&apos;s live PoolKey
+              ({poolKey.currency0.slice(0, 6)}… / {poolKey.currency1.slice(0, 6)}…).
+              The frontend may be pointing at a stale deployment.
+            </div>
+          </div>
+        ) : null}
         {!poolSeeded ? (
           <div className="mb-4 rounded-xl border border-amber-400/30 bg-amber-500/5 p-3 text-xs text-amber-200">
-            <div className="font-semibold text-amber-100">No active in-range liquidity yet</div>
+            <div className="font-semibold text-amber-100">Low deployed liquidity (informational)</div>
             <div className="mt-1 text-amber-200/80">
-              Deposits can qualify for vault and bootstrap accounting while the
-              single-sided USDC position sits outside the live price. Swaps through
-              the hook need in-range liquidity; until price enters the range or the
-              owner rebalances around the market, the form is preview-only and may
-              revert with <code className="text-amber-100">NoLiquidityToReceiveFees</code>.
+              Vault reports little or no deployed liquidity. Quotes from the V4Quoter are
+              authoritative — if a quote returns, the swap is enabled. Quote failures
+              may indicate the pool has no in-range liquidity (e.g. a single-sided USDC
+              position outside the live tick), in which case
+              <code className="text-amber-100">NoLiquidityToReceiveFees</code> can revert.
+            </div>
+          </div>
+        ) : null}
+        {planError ? (
+          <div className="mb-4 rounded-xl border border-red-400/30 bg-red-500/5 p-3 text-xs text-red-200">
+            <div className="font-semibold text-red-100">Swap plan rejected</div>
+            <div className="mt-1 text-red-200/80">
+              Client-side validation failed: <code className="text-red-100">{planError}</code>.
+              Adjust amount or direction and try again.
             </div>
           </div>
         ) : null}
@@ -319,7 +426,7 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
               inputMode="decimal"
               placeholder="0.0"
               value={amount}
-              onChange={(e) => setAmount(e.target.value.replace(/[^\d.]/g, ''))}
+              onChange={(e) => { setAmount(e.target.value.replace(/[^\d.]/g, '')); setPlanError(null); }}
               className="flex-1 bg-transparent text-2xl font-medium text-white outline-none"
             />
             <button
@@ -406,20 +513,24 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
             <div className="font-semibold text-white mb-2">Where this swap&apos;s fee goes</div>
             <div className="grid gap-1 text-zinc-300">
               <Row
-                label="Hook fee on this swap (0.25%)"
-                value={`${fmtUnits(hookFee, inputDecimals, inputIsUSDC ? 4 : 6)} ${inputSymbol}`}
+                label="Estimated hook fee basis (0.25%)"
+                value={`${fmtUnits(hookFee, feeBasisDecimals, feeBasisDecimals === 6 ? 4 : 6)} ${feeBasisSymbol}`}
               />
               <Row
                 label="↳ Treasury (20%)"
-                value={`${fmtUnits(treasuryAmount, inputDecimals, inputIsUSDC ? 4 : 6)} ${inputSymbol}`}
+                value={`${fmtUnits(treasuryAmount, feeBasisDecimals, feeBasisDecimals === 6 ? 4 : 6)} ${feeBasisSymbol}`}
                 muted
               />
               <Row
                 label="↳ LP donation (80%)"
-                value={`${fmtUnits(lpDonation, inputDecimals, inputIsUSDC ? 4 : 6)} ${inputSymbol}`}
+                value={`${fmtUnits(lpDonation, feeBasisDecimals, feeBasisDecimals === 6 ? 4 : 6)} ${feeBasisSymbol}`}
                 muted
               />
             </div>
+            <p className="mt-2 text-xs text-zinc-400">
+              Fee basis tracks the absolute unspecified-currency delta in `afterSwap`.
+              Here it is estimated from quote output for exact-input swaps.
+            </p>
             {userShares && userShares > 0n ? (
               <div className="mt-3 border-t border-white/10 pt-3">
                 <div className="font-semibold text-white mb-1">Your stake&apos;s cut</div>
@@ -433,7 +544,7 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
                 />
                 <Row
                   label="≈ Your share of this swap's donation"
-                  value={`${fmtUnits(userShareOfDonation, inputDecimals, inputIsUSDC ? 6 : 8)} ${inputSymbol}`}
+                  value={`${fmtUnits(userShareOfDonation, feeBasisDecimals, feeBasisDecimals === 6 ? 6 : 8)} ${feeBasisSymbol}`}
                   highlight
                 />
                 <Row
@@ -462,8 +573,13 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
         <div className="mt-5">
           <button
             type="button"
-            onClick={txAction.onClick}
-            disabled={swapDisabled && !needsErc20Approve && !needsPermit2Approve}
+            onClick={noWallet ? undefined : txAction.onClick}
+            disabled={
+              noWallet ||
+              isPending ||
+              isMining ||
+              (swapDisabled && !needsErc20Approve && !needsPermit2Approve)
+            }
             className="btn-primary w-full justify-center disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isPending || isMining
@@ -472,9 +588,9 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
                 : step === 'approvePermit2'
                   ? 'Setting Permit2…'
                   : 'Swapping…'
-              : address
-                ? txAction.label
-                : 'Connect wallet'}
+              : noWallet
+                ? 'Connect wallet'
+                : txAction.label}
           </button>
           {txHash ? (
             <a

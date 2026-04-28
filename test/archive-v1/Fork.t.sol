@@ -11,7 +11,7 @@ import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 
-import {LiquidityVault} from "../src/LiquidityVault.sol";
+import {LiquidityVault} from "../../src/archive-v1/LiquidityVault.sol";
 
 /// @title  Fork.t.sol
 /// @notice End-to-end fork tests against canonical Arbitrum One Uniswap v4

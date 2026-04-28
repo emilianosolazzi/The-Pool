@@ -238,4 +238,87 @@ contract FeeDistributorTest is Test {
         assertEq(MockERC20(tokenAddr).balanceOf(treasury) - treasuryBefore, (amount * 40) / 100);
         assertEq(distributor.totalToLPs(), amount - (amount * 40) / 100);
     }
+
+    // -----------------------------------------------------------------
+    // Recovery paths after FeeDistributionFailed (hook side soft-fail).
+    // -----------------------------------------------------------------
+
+    function test_retryDistribute_ownerOnly() public {
+        Currency feeCur = poolKey.currency0;
+        MockERC20(Currency.unwrap(feeCur)).mint(address(distributor), 1000);
+
+        vm.prank(hookAddr); // not owner
+        vm.expectRevert();
+        distributor.retryDistribute(feeCur, 1000);
+    }
+
+    function test_retryDistribute_distributesParkedFees() public {
+        Currency feeCur = poolKey.currency0;
+        address t = Currency.unwrap(feeCur);
+        uint256 amount = 500;
+        // Simulate the hook's "fee parked" outcome: tokens already at the
+        // distributor, but no `distribute()` ran (it would've reverted).
+        MockERC20(t).mint(address(distributor), amount);
+
+        uint256 distrBefore = distributor.totalDistributed();
+        uint256 trBefore = MockERC20(t).balanceOf(treasury);
+
+        // Owner retries once the underlying cause is cleared.
+        distributor.retryDistribute(feeCur, amount);
+
+        assertEq(distributor.totalDistributed(), distrBefore + amount, "distributed += amount");
+        assertEq(MockERC20(t).balanceOf(treasury) - trBefore, (amount * 20) / 100, "treasury cut");
+        assertEq(MockERC20(t).balanceOf(address(distributor)), 0, "no leftover after retry");
+    }
+
+    function test_retryDistribute_revertsWhenBalanceInsufficient() public {
+        Currency feeCur = poolKey.currency0;
+        MockERC20(Currency.unwrap(feeCur)).mint(address(distributor), 100);
+
+        vm.expectRevert("INSUFFICIENT_BALANCE");
+        distributor.retryDistribute(feeCur, 200);
+    }
+
+    function test_retryDistribute_revertsOnZeroAmount() public {
+        vm.expectRevert("ZERO_AMOUNT");
+        distributor.retryDistribute(poolKey.currency0, 0);
+    }
+
+    function test_sweepUndistributed_ownerOnly() public {
+        Currency feeCur = poolKey.currency0;
+        MockERC20(Currency.unwrap(feeCur)).mint(address(distributor), 1000);
+
+        vm.prank(hookAddr);
+        vm.expectRevert();
+        distributor.sweepUndistributed(feeCur, hookAddr, 1000);
+    }
+
+    function test_sweepUndistributed_movesTokensToOwnerTarget() public {
+        Currency feeCur = poolKey.currency0;
+        address t = Currency.unwrap(feeCur);
+        address rescue = makeAddr("rescue");
+        uint256 amount = 250;
+        MockERC20(t).mint(address(distributor), amount);
+
+        distributor.sweepUndistributed(feeCur, rescue, amount);
+
+        assertEq(MockERC20(t).balanceOf(rescue), amount, "rescued");
+        assertEq(MockERC20(t).balanceOf(address(distributor)), 0, "drained");
+        // Sweep is escape-hatch: it does NOT touch totalDistributed accounting.
+        assertEq(distributor.totalDistributed(), 0, "sweep does not bump totals");
+    }
+
+    function test_sweepUndistributed_rejectsForeignToken() public {
+        // Unrelated ERC20 must not be exfiltrable through this function.
+        MockERC20 foreign = new MockERC20("Foreign", "FOR", 18);
+        foreign.mint(address(distributor), 1_000);
+
+        vm.expectRevert(abi.encodeWithSelector(FeeDistributor.InvalidDistributionCurrency.selector, address(foreign)));
+        distributor.sweepUndistributed(Currency.wrap(address(foreign)), makeAddr("rescue"), 1_000);
+    }
+
+    function test_sweepUndistributed_rejectsZeroAddress() public {
+        vm.expectRevert("ZERO_ADDRESS");
+        distributor.sweepUndistributed(poolKey.currency0, address(0), 100);
+    }
 }

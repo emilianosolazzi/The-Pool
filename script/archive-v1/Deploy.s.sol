@@ -12,10 +12,10 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
 
-import {DynamicFeeHook} from "../src/DynamicFeeHook.sol";
-import {FeeDistributor} from "../src/FeeDistributor.sol";
-import {LiquidityVault} from "../src/LiquidityVault.sol";
-import {HookMiner} from "../test/utils/HookMiner.sol";
+import {DynamicFeeHook} from "../../src/archive-v1/DynamicFeeHook.sol";
+import {FeeDistributor} from "../../src/FeeDistributor.sol";
+import {LiquidityVault} from "../../src/archive-v1/LiquidityVault.sol";
+import {HookMiner} from "../../test/utils/HookMiner.sol";
 
 /// @title Deploy
 /// @notice Deploys the full DeFi Hook Protocol stack in dependency order:

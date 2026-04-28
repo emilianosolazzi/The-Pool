@@ -11,6 +11,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 import {LiquidityVaultV2} from "../src/LiquidityVaultV2.sol";
 import {SwapRouter02ZapAdapter, ISwapRouter02ExactInputSingle} from "../src/SwapRouter02ZapAdapter.sol";
@@ -105,7 +106,10 @@ contract LiquidityVaultV2ForkTest is Test {
         assertGt(shares, 0, "shares minted");
         assertGt(vault.totalLiquidityDeployed(), 0, "live v4 liquidity minted");
         assertGt(vault.positionTokenId(), 0, "position NFT tracked");
-        assertEq(uint256(vault.vaultStatus()), uint256(LiquidityVaultV2.VaultStatus.IN_RANGE), "vault active");
+        (uint160 sqrtPriceX96,,,) = IPoolManager(POOL_MANAGER).getSlot0(poolKey.toId());
+        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(vault.tickLower());
+        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(vault.tickUpper());
+        assertTrue(sqrtPriceX96 >= sqrtLower && sqrtPriceX96 < sqrtUpper, "vault active");
         assertGt(vault.totalAssets(), 0, "NAV positive");
     }
 

@@ -12,7 +12,7 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {LiquidityVault} from "../src/LiquidityVault.sol";
+import {LiquidityVault} from "../../src/archive-v1/LiquidityVault.sol";
 
 /// @title SwapHelper2 — on-chain swap executor (same pattern as TestSwap.s.sol)
 contract SwapHelper2 is IUnlockCallback {

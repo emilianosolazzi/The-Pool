@@ -13,7 +13,7 @@ import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
-import {CurrencySettler} from "v4-core-test/utils/CurrencySettler.sol";
+import {CurrencySettler} from "./libraries/CurrencySettler.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
@@ -23,6 +23,23 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 interface IFeeDistributorV2 {
     function distribute(Currency currency, uint256 amount) external;
+}
+
+/// @notice Pricing mode for a reserve offer.
+///         PRICE_IMPROVEMENT — vault prices its inventory BETTER than the
+///         pool for the swapper (execution improvement). Fill-gate only
+///         passes when the AMM marginal price is at-or-worse than the
+///         vault's quote — i.e. the swapper would be hurt by routing
+///         through the AMM.
+///         VAULT_SPREAD — vault prices its inventory WORSE than the pool
+///         for the swapper (LP earns spread). Fill-gate only passes when
+///         the AMM marginal price is at-or-better than the vault's quote
+///         — i.e. the vault is monetising the spread between the AMM
+///         spot and its own quote, harvesting flow that would otherwise
+///         have gone through the AMM at a price closer to mid.
+enum ReservePricingMode {
+    PRICE_IMPROVEMENT,
+    VAULT_SPREAD
 }
 
 /// @title  DynamicFeeHookV2
@@ -50,6 +67,7 @@ contract DynamicFeeHookV2 is BaseHook, Ownable2Step, ReentrancyGuard {
     error InvalidOffer();
     error UnknownPool();
     error VaultAlreadyRegistered();
+    error NativeCurrencyUnsupported();
 
     // ---------- Fee plumbing (mirrors V1) ----------
     uint24 public constant LP_FEE = 100;
@@ -85,6 +103,7 @@ contract DynamicFeeHookV2 is BaseHook, Ownable2Step, ReentrancyGuard {
         uint64  expiry;                 // unix seconds; 0 = no expiry
         bool    sellingCurrency1;       // true if sellCurrency == key.currency1, else currency0
         bool    active;
+        ReservePricingMode pricingMode; // PRICE_IMPROVEMENT (default) or VAULT_SPREAD
     }
 
     mapping(PoolId => ReserveOffer) public offers;
@@ -95,6 +114,22 @@ contract DynamicFeeHookV2 is BaseHook, Ownable2Step, ReentrancyGuard {
 
     uint256 public totalReserveFills;
     uint256 public totalReserveSold;   // diagnostics; in sellCurrency units (not normalised)
+
+    /// @notice Cumulative un-distributed fee amount per currency. Increments
+    ///         every time `feeDistributor.distribute()` reverts (the fee
+    ///         tokens have already been transferred to the distributor at
+    ///         that point, but the distributor's internal accounting did not
+    ///         update). Operator workflow:
+    ///           1. Fix the underlying cause (e.g. set distributor pool key,
+    ///              repair treasury config).
+    ///           2. Call `FeeDistributor.retryDistribute(currency, amount)`
+    ///              OR `FeeDistributor.sweepUndistributed(...)` to move the
+    ///              parked tokens.
+    ///           3. Call `acknowledgeFailedDistribution(currency, amount)`
+    ///              here to clear the tally so this view stays accurate.
+    ///         This is the canonical on-chain query for "how much fee revenue
+    ///         is parked at the distributor pending operator recovery".
+    mapping(address => uint256) public failedDistribution;
 
     event FeeRouted(address indexed currency, uint256 amount, uint256 swapIndex);
     event DistributorUpdated(address indexed old, address indexed newDistributor);
@@ -109,6 +144,11 @@ contract DynamicFeeHookV2 is BaseHook, Ownable2Step, ReentrancyGuard {
         uint160 vaultSqrtPriceX96,
         uint64 expiry
     );
+    /// @notice Companion event so off-chain consumers can read the pricing
+    ///         mode of a freshly-created offer without ABI-breaking the
+    ///         original `ReserveOfferCreated` shape. Always emitted right
+    ///         after `ReserveOfferCreated`.
+    event ReserveOfferMode(bytes32 indexed poolId, address indexed vault, ReservePricingMode mode);
     event ReserveOfferCancelled(bytes32 indexed poolId, address indexed vault, uint128 returnedAmount);
     event ReserveFilled(
         bytes32 indexed poolId,
@@ -118,6 +158,25 @@ contract DynamicFeeHookV2 is BaseHook, Ownable2Step, ReentrancyGuard {
         uint160 poolSqrtPriceX96
     );
     event ReserveProceedsClaimed(address indexed vault, address indexed currency, uint256 amount);
+    /// @notice Emitted when a swap matched the offer's direction but the price
+    ///         gate skipped the fill because the AMM moved through the offer.
+    ///         Keepers subscribe to this event to know when to call
+    ///         `rebalanceOffer` on the vault. Only emitted when |driftBps| > 50
+    ///         to avoid log spam on tiny drifts.
+    event ReserveOfferStale(bytes32 indexed poolId, address indexed vault, int256 driftBps);
+
+    /// @notice Emitted when fee distribution fails. The fee has already been
+    ///         transferred to the distributor; the swap is NOT reverted to
+    ///         avoid turning a misconfigured distributor into a swap-DoS
+    ///         vector. Operator must fix the distributor and recover via
+    ///         its admin path (sweep / re-distribute).
+    event FeeDistributionFailed(address indexed currency, uint256 amount, uint256 swapIndex);
+
+    /// @notice Emitted when the owner acknowledges that a previously-failed
+    ///         distribution has been recovered out-of-band (via the
+    ///         distributor's `retryDistribute` or `sweepUndistributed`).
+    ///         Pure bookkeeping; no token movement.
+    event FailedDistributionAcknowledged(address indexed currency, uint256 amount, address indexed by);
 
     constructor(IPoolManager _poolManager, address _distributor, address _owner)
         BaseHook(_poolManager)
@@ -155,6 +214,12 @@ contract DynamicFeeHookV2 is BaseHook, Ownable2Step, ReentrancyGuard {
     ///         the depositor's counterparty.
     function registerVault(PoolKey calldata key, address vault) external onlyOwner {
         require(vault != address(0), "ZERO_VAULT");
+        // Reject native ETH pools. The whole stack assumes ERC-20 currencies
+        // (transferFrom, balanceOf, forceApprove). Native support is a
+        // separate, larger feature.
+        if (Currency.unwrap(key.currency0) == address(0) || Currency.unwrap(key.currency1) == address(0)) {
+            revert NativeCurrencyUnsupported();
+        }
         PoolId pid = key.toId();
         if (registeredVault[pid] != address(0)) revert VaultAlreadyRegistered();
         registeredVault[pid] = vault;
@@ -177,9 +242,41 @@ contract DynamicFeeHookV2 is BaseHook, Ownable2Step, ReentrancyGuard {
         uint160 vaultSqrtPriceX96,
         uint64 expiry
     ) external nonReentrant {
+        // Backward-compatible default: existing callers get PRICE_IMPROVEMENT.
+        _createReserveOffer(key, sellCurrency, sellAmount, vaultSqrtPriceX96, expiry, ReservePricingMode.PRICE_IMPROVEMENT);
+    }
+
+    /// @notice Mode-aware reserve-offer creation. Mirrors `createReserveOffer`
+    ///         but lets the vault pick PRICE_IMPROVEMENT (existing behaviour:
+    ///         vault quotes better than pool, swapper benefits) or
+    ///         VAULT_SPREAD (vault quotes worse than pool, vault earns the
+    ///         spread).
+    function createReserveOfferWithMode(
+        PoolKey calldata key,
+        Currency sellCurrency,
+        uint128 sellAmount,
+        uint160 vaultSqrtPriceX96,
+        uint64 expiry,
+        ReservePricingMode mode
+    ) external nonReentrant {
+        _createReserveOffer(key, sellCurrency, sellAmount, vaultSqrtPriceX96, expiry, mode);
+    }
+
+    function _createReserveOffer(
+        PoolKey calldata key,
+        Currency sellCurrency,
+        uint128 sellAmount,
+        uint160 vaultSqrtPriceX96,
+        uint64 expiry,
+        ReservePricingMode mode
+    ) internal {
         PoolId pid = key.toId();
         if (registeredVault[pid] != msg.sender) revert NotRegisteredVault();
         if (sellAmount == 0 || vaultSqrtPriceX96 == 0) revert InvalidOffer();
+        // Defense in depth: native pools should already have been blocked at
+        // registerVault, but assert here so a clean error surfaces if a
+        // non-standard registration path is ever added.
+        if (Currency.unwrap(sellCurrency) == address(0)) revert NativeCurrencyUnsupported();
         // Match v4 pool bounds. Outside this range, fill-time math (which
         // multiplies sqrtP by sqrtP via two mulDiv steps) can overflow on
         // realistic inventory sizes and DoS the swap.
@@ -212,13 +309,15 @@ contract DynamicFeeHookV2 is BaseHook, Ownable2Step, ReentrancyGuard {
             vaultSqrtPriceX96: vaultSqrtPriceX96,
             expiry: expiry,
             sellingCurrency1: sellsCurrency1,
-            active: true
+            active: true,
+            pricingMode: mode
         });
         escrowedReserve[msg.sender][sellCurrency] += sellAmount;
 
         emit ReserveOfferCreated(
             PoolId.unwrap(pid), msg.sender, Currency.unwrap(sellCurrency), sellAmount, vaultSqrtPriceX96, expiry
         );
+        emit ReserveOfferMode(PoolId.unwrap(pid), msg.sender, mode);
     }
 
     /// @notice Cancel an active offer; remaining inventory returns to vault.
@@ -312,14 +411,34 @@ contract DynamicFeeHookV2 is BaseHook, Ownable2Step, ReentrancyGuard {
         (uint160 poolSqrtP,,,) = poolManager.getSlot0(pid);
         if (poolSqrtP == 0) return BeforeSwapDeltaLibrary.ZERO_DELTA;
 
-        // Price gate: only fill when offer is at-or-better than AMM for swapper.
-        // - selling currency1 (zeroForOne): need poolSqrtP <= vaultSqrtP
-        //   (vault gives more token1 per token0 than AMM -> swapper benefits).
-        // - selling currency0 (oneForZero): need poolSqrtP >= vaultSqrtP.
-        if (o.sellingCurrency1) {
-            if (poolSqrtP > o.vaultSqrtPriceX96) return BeforeSwapDeltaLibrary.ZERO_DELTA;
+        // Price gate. Two intents, two gate orientations:
+        //
+        //  PRICE_IMPROVEMENT (existing): vault quote is at-or-better than AMM
+        //    for the swapper. Fill only when AMM is at-or-worse than vault.
+        //    - selling currency1 (zeroForOne): poolSqrtP <= vaultSqrtP
+        //      (vault gives MORE token1 per token0 than AMM -> swapper wins)
+        //    - selling currency0 (oneForZero): poolSqrtP >= vaultSqrtP
+        //
+        //  VAULT_SPREAD (new): vault quote is at-or-worse than AMM for the
+        //    swapper. Vault monetises the spread on flow that would have
+        //    cleared on the AMM at a tighter price. Fill only when AMM is
+        //    at-or-better than vault.
+        //    - selling currency1 (zeroForOne): poolSqrtP >= vaultSqrtP
+        //    - selling currency0 (oneForZero): poolSqrtP <= vaultSqrtP
+        bool gatePass;
+        if (o.pricingMode == ReservePricingMode.PRICE_IMPROVEMENT) {
+            gatePass = o.sellingCurrency1
+                ? (poolSqrtP <= o.vaultSqrtPriceX96)
+                : (poolSqrtP >= o.vaultSqrtPriceX96);
         } else {
-            if (poolSqrtP < o.vaultSqrtPriceX96) return BeforeSwapDeltaLibrary.ZERO_DELTA;
+            // VAULT_SPREAD
+            gatePass = o.sellingCurrency1
+                ? (poolSqrtP >= o.vaultSqrtPriceX96)
+                : (poolSqrtP <= o.vaultSqrtPriceX96);
+        }
+        if (!gatePass) {
+            _maybeEmitStale(pid, poolSqrtP, o.vaultSqrtPriceX96);
+            return BeforeSwapDeltaLibrary.ZERO_DELTA;
         }
 
         uint256 maxInput = uint256(-params.amountSpecified);
@@ -468,7 +587,17 @@ contract DynamicFeeHookV2 is BaseHook, Ownable2Step, ReentrancyGuard {
         poolManager.take(feeCurrency, address(this), fee);
         if (address(feeDistributor) != address(0)) {
             feeCurrency.transfer(address(feeDistributor), fee);
-            feeDistributor.distribute(feeCurrency, fee);
+            // Soft-fail: a reverting distributor MUST NOT block the swap. The
+            // fee tokens already left the hook to the distributor; recovery
+            // is the distributor owner's responsibility (sweep / fix config /
+            // re-distribute). Without this guard, a misconfigured
+            // distributor turns the hook into a swap-DoS vector.
+            try feeDistributor.distribute(feeCurrency, fee) {
+                // distributed
+            } catch {
+                failedDistribution[Currency.unwrap(feeCurrency)] += fee;
+                emit FeeDistributionFailed(Currency.unwrap(feeCurrency), fee, totalSwaps);
+            }
         }
 
         totalFeesRouted += fee;
@@ -495,6 +624,69 @@ contract DynamicFeeHookV2 is BaseHook, Ownable2Step, ReentrancyGuard {
         return offers[key.toId()];
     }
 
+    /// @notice Boolean view used by the vault to gate cancel calls in
+    ///         {LiquidityVaultV2.rebalanceOffer} so real cancel failures
+    ///         (paused hook, bad pool key, accounting bug) cannot be
+    ///         silently swallowed.
+    function offerActive(PoolKey calldata key) external view returns (bool) {
+        return offers[key.toId()].active;
+    }
+
+    /// @notice One-call health view for keepers / frontend.
+    /// @dev    `driftBps` ≈ 2 × (poolSqrtP − vaultSqrtP) / vaultSqrtP, signed,
+    ///         in basis points. Approximation of the price drift since price
+    ///         ≈ sqrtP². When the offer is inactive driftBps is 0.
+    /// @return active           true when the offer is currently fillable.
+    /// @return driftBps         signed drift between pool and vault sqrt-price.
+    /// @return escrow0          vault inventory escrowed in currency0.
+    /// @return escrow1          vault inventory escrowed in currency1.
+    /// @return proceeds0        claimable proceeds in currency0.
+    /// @return proceeds1        claimable proceeds in currency1.
+    /// @return vaultSqrtPriceX96 vault's chosen sale price.
+    /// @return poolSqrtPriceX96  current pool spot.
+    function getOfferHealth(PoolKey calldata key, address vault)
+        external
+        view
+        returns (
+            bool active,
+            int256 driftBps,
+            uint256 escrow0,
+            uint256 escrow1,
+            uint256 proceeds0,
+            uint256 proceeds1,
+            uint160 vaultSqrtPriceX96,
+            uint160 poolSqrtPriceX96
+        )
+    {
+        PoolId pid = key.toId();
+        ReserveOffer memory o = offers[pid];
+        active = o.active;
+        vaultSqrtPriceX96 = o.vaultSqrtPriceX96;
+        (poolSqrtPriceX96,,,) = poolManager.getSlot0(pid);
+
+        if (active && vaultSqrtPriceX96 > 0) {
+            // signed: pool > vault → positive drift, pool < vault → negative.
+            int256 diff = int256(uint256(poolSqrtPriceX96)) - int256(uint256(vaultSqrtPriceX96));
+            driftBps = (diff * 2 * int256(BPS_DENOMINATOR)) / int256(uint256(vaultSqrtPriceX96));
+        }
+
+        escrow0   = escrowedReserve[vault][key.currency0];
+        escrow1   = escrowedReserve[vault][key.currency1];
+        proceeds0 = proceedsOwed[vault][key.currency0];
+        proceeds1 = proceedsOwed[vault][key.currency1];
+    }
+
+    /// @dev Emit `ReserveOfferStale` when |drift| > 50 bps. Keepers listen.
+    function _maybeEmitStale(PoolId pid, uint160 poolSqrtP, uint160 vaultSqrtP) internal {
+        if (vaultSqrtP == 0) return;
+        int256 diff = int256(uint256(poolSqrtP)) - int256(uint256(vaultSqrtP));
+        int256 driftBps = (diff * 2 * int256(BPS_DENOMINATOR)) / int256(uint256(vaultSqrtP));
+        int256 absDrift = driftBps >= 0 ? driftBps : -driftBps;
+        if (absDrift > 50) {
+            emit ReserveOfferStale(PoolId.unwrap(pid), registeredVault[pid], driftBps);
+        }
+    }
+
     function setMaxFeeBps(uint256 newBps) external onlyOwner {
         require(newBps <= 1000, "BPS_TOO_HIGH");
         emit MaxFeeBpsUpdated(maxFeeBps, newBps);
@@ -504,6 +696,22 @@ contract DynamicFeeHookV2 is BaseHook, Ownable2Step, ReentrancyGuard {
     function setFeeDistributor(address newDistributor) external onlyOwner {
         emit DistributorUpdated(address(feeDistributor), newDistributor);
         feeDistributor = IFeeDistributorV2(newDistributor);
+    }
+
+    /// @notice Owner-only bookkeeping: clear `amount` from
+    ///         `failedDistribution[currency]` after the operator has
+    ///         physically recovered the parked tokens via the distributor's
+    ///         `retryDistribute` or `sweepUndistributed`. No token movement
+    ///         happens here; this only keeps the on-chain unresolved-fee
+    ///         tally accurate. Reverts on under-flow so the tally cannot go
+    ///         negative or be over-acknowledged.
+    function acknowledgeFailedDistribution(Currency currency, uint256 amount) external onlyOwner {
+        require(amount > 0, "ZERO_AMOUNT");
+        address c = Currency.unwrap(currency);
+        uint256 outstanding = failedDistribution[c];
+        require(amount <= outstanding, "AMOUNT_EXCEEDS_FAILED");
+        unchecked { failedDistribution[c] = outstanding - amount; }
+        emit FailedDistributionAcknowledged(c, amount, msg.sender);
     }
 
     function getStats() external view returns (uint256, uint256, address, uint256, uint256) {

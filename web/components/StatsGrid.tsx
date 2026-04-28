@@ -2,7 +2,7 @@
 
 import { useMemo } from 'react';
 import { useReadContract } from 'wagmi';
-import { vaultAbi } from '@/lib/abis';
+import { vaultAbi, lensAbi } from '@/lib/abis';
 import { fmtCompact, fmtUnits } from '@/lib/format';
 import { type Deployment } from '@/lib/deployments';
 import type { Address } from 'viem';
@@ -14,7 +14,9 @@ interface Props {
 
 export function StatsGrid({ deployment, chainId }: Props) {
   const vault = deployment.vault as Address | undefined;
+  const lens = deployment.lens as Address | undefined;
   const enabled = Boolean(vault);
+  const statsEnabled = Boolean(vault && lens);
 
   const {
     data: rawStats,
@@ -22,11 +24,12 @@ export function StatsGrid({ deployment, chainId }: Props) {
     isError: isStatsError,
     error: statsError,
   } = useReadContract({
-    address: vault,
-    abi: vaultAbi,
+    address: lens,
+    abi: lensAbi,
     functionName: 'getVaultStats',
+    args: vault ? [vault] : undefined,
     chainId,
-    query: { enabled, refetchInterval: 15_000 },
+    query: { enabled: statsEnabled, refetchInterval: 15_000 },
   });
 
   const { data: tickLower, isLoading: isTickLowerLoading } = useReadContract({
