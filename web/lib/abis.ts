@@ -23,6 +23,25 @@ export const vaultAbi = [
   { type: 'function', name: 'previewRedeem', stateMutability: 'view', inputs: [{ type: 'uint256' }], outputs: [{ type: 'uint256' }] },
   { type: 'function', name: 'deposit', stateMutability: 'nonpayable', inputs: [{ type: 'uint256' }, { type: 'address' }], outputs: [{ type: 'uint256' }] },
   { type: 'function', name: 'redeem', stateMutability: 'nonpayable', inputs: [{ type: 'uint256' }, { type: 'address' }, { type: 'address' }], outputs: [{ type: 'uint256' }] },
+  // V2 zap deposit: vault swaps `assetsToSwap` of the asset into the other
+  // pool token via the configured V3 zap adapter, then mints LP. Shares are
+  // minted from the realised NAV delta, so existing depositors are not
+  // diluted by the new depositor's swap cost.
+  {
+    type: 'function',
+    name: 'depositWithZap',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'assets', type: 'uint256' },
+      { name: 'receiver', type: 'address' },
+      { name: 'assetsToSwap', type: 'uint256' },
+      { name: 'minOtherOut', type: 'uint256' },
+      { name: 'minLiquidity', type: 'uint256' },
+      { name: 'minSharesOut', type: 'uint256' },
+      { name: 'deadline', type: 'uint256' },
+    ],
+    outputs: [{ type: 'uint256' }],
+  },
   // Pool-specific views
   {
     type: 'function',
