@@ -53,6 +53,44 @@ export const vaultAbi = [
   ] }] },
 ] as const satisfies Abi;
 
+// VaultLens — V2.1 split moved aggregate views off the vault into a stateless lens.
+export const lensAbi = [
+  {
+    type: 'function',
+    name: 'getVaultStats',
+    stateMutability: 'view',
+    inputs: [{ name: 'vault', type: 'address' }],
+    outputs: [
+      { name: 'tvl', type: 'uint256' },
+      { name: 'sharePrice', type: 'uint256' },
+      { name: 'depositors', type: 'uint256' },
+      { name: 'liqDeployed', type: 'uint256' },
+      { name: 'yieldColl', type: 'uint256' },
+      { name: 'feeDesc', type: 'string' },
+    ],
+  },
+  {
+    type: 'function',
+    name: 'vaultStatus',
+    stateMutability: 'view',
+    inputs: [{ name: 'vault', type: 'address' }],
+    outputs: [{ type: 'uint8' }],
+  },
+  {
+    type: 'function',
+    name: 'poolKeyView',
+    stateMutability: 'view',
+    inputs: [{ name: 'vault', type: 'address' }],
+    outputs: [{ type: 'tuple', components: [
+      { name: 'currency0', type: 'address' },
+      { name: 'currency1', type: 'address' },
+      { name: 'fee', type: 'uint24' },
+      { name: 'tickSpacing', type: 'int24' },
+      { name: 'hooks', type: 'address' },
+    ] }],
+  },
+] as const satisfies Abi;
+
 // Uniswap v4 PoolManager ABI for pool state queries
 export const poolManagerAbi = [
   {

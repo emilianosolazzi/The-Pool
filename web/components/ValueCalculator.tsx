@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { useReadContract, useReadContracts } from 'wagmi';
-import { vaultAbi, poolManagerAbi } from '@/lib/abis';
+import { vaultAbi, lensAbi, poolManagerAbi } from '@/lib/abis';
 import { fmtCompact } from '@/lib/format';
 import { type Deployment } from '@/lib/deployments';
 import { encodeAbiParameters, keccak256, type Address, type Hex } from 'viem';
@@ -40,20 +40,22 @@ export function ValueCalculator({ deployment, chainId }: Props) {
   const [timeframe, setTimeframe] = useState<'1D' | '7D' | '30D' | '1Y'>('30D');
 
   const vault = deployment.vault as Address | undefined;
+  const lens = deployment.lens as Address | undefined;
   const poolManager = deployment.poolManager as Address | undefined;
 
-  // Get vault stats
+  // Get vault stats (V2.1: getVaultStats lives on the lens)
   const {
     data: vaultStatsData,
     isLoading: isVaultStatsLoading,
     isError: isVaultStatsError,
     error: vaultStatsError,
   } = useReadContract({
-    address: vault,
-    abi: vaultAbi,
+    address: lens,
+    abi: lensAbi,
     functionName: 'getVaultStats',
+    args: vault ? [vault] : undefined,
     chainId,
-    query: { enabled: Boolean(vault), refetchInterval: 30_000 },
+    query: { enabled: Boolean(vault && lens), refetchInterval: 30_000 },
   });
 
   const vaultStats = useMemo<VaultStatsTuple | undefined>(() => {

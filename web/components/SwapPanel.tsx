@@ -26,6 +26,7 @@ import { parseUnits, formatUnits, type Address } from 'viem';
 import {
   erc20Abi,
   vaultAbi,
+  lensAbi,
   universalRouterAbi,
   v4QuoterAbi,
   permit2Abi,
@@ -64,6 +65,7 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
   const weth = infra?.weth;
   const hook = deployment.hook as Address | undefined;
   const vault = deployment.vault as Address | undefined;
+  const lens = deployment.lens as Address | undefined;
 
   const supported = Boolean(infra && chainId === arbitrum.id && usdc && weth && hook && vault);
 
@@ -178,7 +180,7 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
             { address: PERMIT2, abi: permit2Abi, functionName: 'allowance', args: [address, inputToken, infra.universalRouter], chainId },
             { address: vault, abi: vaultAbi, functionName: 'balanceOf', args: [address], chainId },
             { address: vault, abi: vaultAbi, functionName: 'totalSupply', chainId },
-            { address: vault, abi: vaultAbi, functionName: 'getVaultStats', chainId },
+            { address: lens ?? vault, abi: lensAbi, functionName: 'getVaultStats', args: [vault], chainId },
           ] as const)
         : [],
     query: { enabled: supported && Boolean(address), refetchInterval: 15_000 },
