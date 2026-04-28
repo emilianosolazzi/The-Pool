@@ -249,7 +249,7 @@ contract LiquidityVaultV2Test is Test {
 
         vm.startPrank(alice);
         usdc.approve(address(vault), type(uint256).max);
-        vm.expectRevert("ZAP_ROUTER_NOT_SET");
+        vm.expectRevert(LiquidityVaultV2.ZapRouterNotSet.selector);
         vault.depositWithZap(100e6, alice, 50e6, 1, 1, 0, block.timestamp + 1);
         vm.stopPrank();
     }
@@ -263,7 +263,7 @@ contract LiquidityVaultV2Test is Test {
         usdc.approve(address(vault), type(uint256).max);
         // Mint produces a finite share amount; require a wildly high minimum
         // so the post-zap fair-share calc cannot satisfy it -> MIN_SHARES_OUT.
-        vm.expectRevert("MIN_SHARES_OUT");
+        vm.expectRevert(LiquidityVaultV2.MinSharesOut.selector);
         vault.depositWithZap(100e6, alice, 50e6, 1 ether, 1, type(uint256).max, block.timestamp + 1);
         vm.stopPrank();
     }
@@ -276,7 +276,7 @@ contract LiquidityVaultV2Test is Test {
 
     function test_offerReserveToHook_revertsWhenHookNotSet() public {
         weth.mint(address(vault), 1 ether);
-        vm.expectRevert("HOOK_NOT_SET");
+        vm.expectRevert(LiquidityVaultV2.HookNotSet.selector);
         vault.offerReserveToHook(Currency.wrap(address(weth)), uint128(1 ether), uint160(1 << 96), 0);
     }
 
@@ -310,7 +310,7 @@ contract LiquidityVaultV2Test is Test {
     }
 
     function test_setRemoveLiquiditySlippageBps_revertsAboveCap() public {
-        vm.expectRevert("SLIPPAGE_TOO_HIGH");
+        vm.expectRevert(LiquidityVaultV2.SlippageTooHigh.selector);
         vault.setRemoveLiquiditySlippageBps(101);
     }
 
@@ -331,12 +331,12 @@ contract LiquidityVaultV2Test is Test {
     }
 
     function test_setInitialTicks_revertsWhenNotSpacingAligned() public {
-        vm.expectRevert("TICK_NOT_ALIGNED");
+        vm.expectRevert(LiquidityVaultV2.TickNotAligned.selector);
         vault.setInitialTicks(-3001, 3000);
     }
 
     function test_setInitialTicks_revertsWhenInverted() public {
-        vm.expectRevert("INVALID_TICKS");
+        vm.expectRevert(LiquidityVaultV2.InvalidTicks.selector);
         vault.setInitialTicks(3000, -3000);
     }
 
@@ -380,7 +380,7 @@ contract LiquidityVaultV2Test is Test {
 
         vm.startPrank(alice);
         usdc.approve(address(vault), type(uint256).max);
-        vm.expectRevert("RANGE_NOT_ACTIVE");
+        vm.expectRevert(LiquidityVaultV2.RangeNotActive.selector);
         vault.depositWithZap(100e6, alice, 50e6, 1 ether, 1, 0, block.timestamp + 1);
         vm.stopPrank();
     }
@@ -389,7 +389,7 @@ contract LiquidityVaultV2Test is Test {
     function test_setReserveHook_revertsOnHookMismatch() public {
         // A different deployed contract — has code but != poolKey.hooks.
         address foreignHook = address(new MockReserveHook());
-        vm.expectRevert("HOOK_MISMATCH");
+        vm.expectRevert(LiquidityVaultV2.HookMismatch.selector);
         vault.setReserveHook(foreignHook);
     }
 
@@ -402,14 +402,14 @@ contract LiquidityVaultV2Test is Test {
     /// @notice rebalance() rejects ticks that are not aligned to tickSpacing.
     function test_rebalance_revertsOnUnalignedTicks() public {
         // tickSpacing = 60. -3001 % 60 != 0.
-        vm.expectRevert("TICK_NOT_ALIGNED");
+        vm.expectRevert(LiquidityVaultV2.TickNotAligned.selector);
         vault.rebalance(-3001, 3000, 0);
     }
 
     /// @notice rebalance() rejects ticks outside TickMath bounds.
     function test_rebalance_revertsOnOutOfBoundTicks() public {
         // TickMath.MAX_TICK = 887272; 887280 is past it (and 60-aligned).
-        vm.expectRevert("TICK_OUT_OF_BOUNDS");
+        vm.expectRevert(LiquidityVaultV2.TickOutOfBounds.selector);
         vault.rebalance(-3000, 887280, 0);
     }
 
@@ -635,7 +635,7 @@ contract LiquidityVaultV2Test is Test {
             hooks: IHooks(address(0))
         });
 
-        vm.expectRevert("NATIVE_NOT_SUPPORTED");
+        vm.expectRevert(LiquidityVaultV2.NativeNotSupported.selector);
         v2.setPoolKey(nativeKey);
     }
 
@@ -705,7 +705,7 @@ contract LiquidityVaultV2Test is Test {
     }
 
     function test_setBootstrapRewards_revertsOnNonContract() public {
-        vm.expectRevert("NOT_CONTRACT");
+        vm.expectRevert(LiquidityVaultV2.NotContract.selector);
         vault.setBootstrapRewards(address(0xBEEF));
     }
 
@@ -1087,7 +1087,7 @@ contract LiquidityVaultV2Test is Test {
         vm.deal(address(this), 1 ether);
         new EthForcer{value: 1 ether}(payable(address(vault)));
 
-        vm.expectRevert(bytes("ZERO_ADDRESS"));
+        vm.expectRevert(LiquidityVaultV2.ZeroAddress.selector);
         vault.rescueNative(payable(address(0)), 1 ether);
     }
 
@@ -1095,7 +1095,7 @@ contract LiquidityVaultV2Test is Test {
         vm.deal(address(this), 1 ether);
         new EthForcer{value: 1 ether}(payable(address(vault)));
 
-        vm.expectRevert(bytes("AMOUNT_EXCEEDS_BALANCE"));
+        vm.expectRevert(LiquidityVaultV2.AmountExceedsBalance.selector);
         vault.rescueNative(payable(makeAddr("recipient")), 2 ether);
     }
 }

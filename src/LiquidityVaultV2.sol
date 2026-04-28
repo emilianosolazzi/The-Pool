@@ -17,10 +17,9 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {LiquidityAmounts} from "./libraries/LiquidityAmounts.sol";
-import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {VaultMath} from "./libraries/VaultMath.sol";
+import {VaultLP} from "./libraries/VaultLP.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
-import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
-import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 import {IZapRouter} from "./interfaces/IZapRouter.sol";
 import {ReservePricingMode} from "./DynamicFeeHookV2.sol";
 
@@ -69,7 +68,6 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     using StateLibrary for IPoolManager;
 
     uint256 public constant MIN_DEPOSIT = 1e6;
-    uint256 private constant Q96 = 1 << 96;
 
     int24 public tickLower = -199020;
     int24 public tickUpper = -198840;
@@ -142,13 +140,6 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     ///         500 bps = 5%; values above this are rejected.
     uint256 public constant MAX_NAV_DEVIATION_CAP = 500;
 
-    enum VaultStatus {
-        UNCONFIGURED,
-        PAUSED,
-        IN_RANGE,
-        OUT_OF_RANGE
-    }
-
     event LiquidityDeployed(uint256 amount0, uint256 amount1, uint256 liquidity);
     event LiquidityRemoved(uint256 amount0, uint256 amount1, uint256 liquidity);
     event YieldCollected(uint256 amount, uint256 timestamp);
@@ -175,6 +166,41 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     event MaxNavDeviationBpsUpdated(uint256 oldBps, uint256 newBps);
     event NativeRescued(address indexed to, uint256 amount);
 
+    error MinDeposit();
+    error PoolKeyNotSet();
+    error TvlCap();
+    error SwapTooLarge();
+    error MinLiquidity();
+    error NoNetValueAdded();
+    error MinSharesOut();
+    error ZeroShares();
+    error InsufficientAssetUseZap();
+    error ZapRouterNotSet();
+    error Deadline();
+    error AmountTooLarge();
+    error MinZapOut();
+    error RangeNotActive();
+    error AlreadySet();
+    error AssetNotInPool();
+    error PositionLive();
+    error InvalidTicks();
+    error TickNotAligned();
+    error TickOutOfBounds();
+    error NotContract();
+    error HookMismatch();
+    error HookNotSet();
+    error ZeroAmount();
+    error ZeroAddress();
+    error FeeTooHigh();
+    error SlippageTooHigh();
+    error DeadlineOutOfRange();
+    error PoolNotInit();
+    error BpsTooHigh();
+    error OtherSwapRequired();
+    error NoOtherToken();
+    error InsufficientAssetOut();
+    error AmountExceedsBalance();
+    error NativeTransferFailed();
     error NAV_PRICE_DEVIATION();
     error NativeNotSupported();
 
@@ -258,17 +284,17 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         // unclamped spot can over- or under-value held inventory; clamping
         // pins the quote to the range edge, the same price at which the
         // position itself would be valued.
-        uint256 quoteSqrt = _clampQuotePrice(sqrtPriceX96);
+        uint256 quoteSqrt = VaultMath.clampQuotePrice(sqrtPriceX96, tickLower, tickUpper);
 
         if (assetIsToken0) {
             uint256 otherTotal = idleOther + pendingOther + escrowOther;
-            uint256 otherInAssetClamped = _quoteToken1ToToken0(otherTotal, quoteSqrt);
-            uint256 amt1InAsset = _quoteToken1ToToken0(amt1, uint256(sqrtPriceX96));
+            uint256 otherInAssetClamped = VaultMath.quoteToken1ToToken0(otherTotal, quoteSqrt);
+            uint256 amt1InAsset = VaultMath.quoteToken1ToToken0(amt1, uint256(sqrtPriceX96));
             return idleAsset + pendingAsset + escrowAsset + amt0 + amt1InAsset + otherInAssetClamped;
         } else {
             uint256 otherTotal = idleOther + pendingOther + escrowOther;
-            uint256 otherInAssetClamped = _quoteToken0ToToken1(otherTotal, quoteSqrt);
-            uint256 amt0InAsset = _quoteToken0ToToken1(amt0, uint256(sqrtPriceX96));
+            uint256 otherInAssetClamped = VaultMath.quoteToken0ToToken1(otherTotal, quoteSqrt);
+            uint256 amt0InAsset = VaultMath.quoteToken0ToToken1(amt0, uint256(sqrtPriceX96));
             return idleAsset + pendingAsset + escrowAsset + amt1 + amt0InAsset + otherInAssetClamped;
         }
     }
@@ -283,47 +309,10 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         if (spot == 0) return 0;
         uint160 ref = navReferenceSqrtPriceX96;
         if (ref == 0) return spot;
-        if (!_priceWithinTolerance(spot, ref, maxNavDeviationBps)) {
+        if (!VaultMath.priceWithinTolerance(spot, ref, maxNavDeviationBps)) {
             revert NAV_PRICE_DEVIATION();
         }
         return spot;
-    }
-
-    /// @dev True when |price(spot) - price(ref)| / price(ref) <= bps / 10000,
-    ///      where price = sqrt^2.
-    ///
-    ///      OVERFLOW SAFETY: We avoid squaring `sqrt` directly (sqrt is up to
-    ///      ~2^160, sqrt^2 is up to ~2^320, which would overflow uint256 even
-    ///      after a /2^64 shift at the high end of the sqrt range). Instead we
-    ///      compute the price ratio (spot/ref)^2 in 1e18 fixed-point via two
-    ///      sequential FullMath.mulDiv operations, both of which fit cleanly
-    ///      in uint256 across the full TickMath.MIN_SQRT_PRICE..MAX_SQRT_PRICE
-    ///      range. See test_nav_deviationMath_doesNotOverflowAtExtremeSqrt.
-    function _priceWithinTolerance(uint160 spot, uint160 ref, uint256 bps) internal pure returns (bool) {
-        // step1 = spot^2 / ref. spot <= 2^160 so spot^2 <= 2^320; dividing by
-        // ref (>= MIN_SQRT_PRICE ~ 2^32) keeps the result <= ~2^288 worst-case,
-        // but in the symmetric case where spot ~ ref the result is just spot,
-        // which fits in uint256. FullMath uses a 512-bit intermediate so the
-        // intermediate product never overflows; only the FINAL value must fit
-        // in uint256.
-        uint256 step1 = FullMath.mulDiv(uint256(spot), uint256(spot), uint256(ref));
-        // ratio = step1 * 1e18 / ref. For spot ~ ref this is ~1e18; FullMath
-        // tolerates the 1e18 multiplier without overflow.
-        uint256 ratio = FullMath.mulDiv(step1, 1e18, uint256(ref));
-        uint256 ONE = 1e18;
-        uint256 tol = (ONE * bps) / 10_000;
-        return ratio >= ONE ? (ratio - ONE) <= tol : (ONE - ratio) <= tol;
-    }
-
-    /// @dev Clamp `sqrt` to the position's range edges. Used only for
-    ///      idle/pending/escrow other-token valuation; the position-leg
-    ///      math always uses the unclamped (deviation-guarded) spot.
-    function _clampQuotePrice(uint160 sqrtP) internal view returns (uint256) {
-        uint160 sqrtA = TickMath.getSqrtPriceAtTick(tickLower);
-        uint160 sqrtB = TickMath.getSqrtPriceAtTick(tickUpper);
-        if (sqrtP < sqrtA) return uint256(sqrtA);
-        if (sqrtP > sqrtB) return uint256(sqrtB);
-        return uint256(sqrtP);
     }
 
     /// @dev Lazily bootstrap `navReferenceSqrtPriceX96` from the current
@@ -340,70 +329,13 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
             emit NavReferenceRefreshed(0, spot);
             return;
         }
-        if (!_priceWithinTolerance(spot, ref, maxNavDeviationBps)) {
+        if (!VaultMath.priceWithinTolerance(spot, ref, maxNavDeviationBps)) {
             revert NAV_PRICE_DEVIATION();
         }
     }
 
-    function _quoteToken0ToToken1(uint256 amount0, uint256 sqrtPriceX96) internal pure returns (uint256) {
-        if (amount0 == 0) return 0;
-        uint256 token1Partial = FullMath.mulDiv(amount0, sqrtPriceX96, Q96);
-        return FullMath.mulDiv(token1Partial, sqrtPriceX96, Q96);
-    }
-
-    function _quoteToken1ToToken0(uint256 amount1, uint256 sqrtPriceX96) internal pure returns (uint256) {
-        if (amount1 == 0) return 0;
-        uint256 token0Partial = FullMath.mulDiv(amount1, Q96, sqrtPriceX96);
-        return FullMath.mulDiv(token0Partial, Q96, sqrtPriceX96);
-    }
-
     function _decimalsOffset() internal pure override returns (uint8) {
         return 6;
-    }
-
-    function vaultStatus() public view returns (VaultStatus) {
-        if (paused()) return VaultStatus.PAUSED;
-        if (!_poolKeySet) return VaultStatus.UNCONFIGURED;
-        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolKey.toId());
-        if (sqrtPriceX96 == 0) return VaultStatus.UNCONFIGURED;
-        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(tickLower);
-        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(tickUpper);
-        if (sqrtPriceX96 >= sqrtLower && sqrtPriceX96 < sqrtUpper) return VaultStatus.IN_RANGE;
-        return VaultStatus.OUT_OF_RANGE;
-    }
-
-    /// @notice Aggregated read for UIs. Pure view, mirrors V1 surface so the
-    ///         frontend can keep a single read for the headline stats.
-    /// @return tvl          totalAssets() in asset units
-    /// @return sharePrice   asset-per-share, normalized to 1e18 (1e18 = no yield)
-    /// @return depositors   distinct addresses that have ever deposited
-    /// @return liqDeployed  cumulative asset notional currently committed to LP
-    /// @return yieldColl    lifetime asset-token yield collected (post fee)
-    /// @return feeDesc      static UI hint; authoritative bps live on the hook
-    function getVaultStats()
-        external
-        view
-        returns (
-            uint256 tvl,
-            uint256 sharePrice,
-            uint256 depositors,
-            uint256 liqDeployed,
-            uint256 yieldColl,
-            string memory feeDesc
-        )
-    {
-        tvl = totalAssets();
-        if (totalSupply() == 0) {
-            sharePrice = 1e18;
-        } else {
-            uint256 oneShareUnit = 10 ** uint256(decimals());
-            uint256 oneAssetUnit = 10 ** (uint256(decimals()) - uint256(_decimalsOffset()));
-            sharePrice = convertToAssets(oneShareUnit).mulDiv(1e18, oneAssetUnit);
-        }
-        depositors = totalDepositors;
-        liqDeployed = assetsDeployed;
-        yieldColl = totalYieldCollected;
-        feeDesc = "Hook fee + base pool fee. Read on-chain: DynamicFeeHookV2.HOOK_FEE_BPS, FeeDistributor.treasuryShare, PoolKey.fee";
     }
 
     function maxDeposit(address) public view override returns (uint256) {
@@ -430,11 +362,11 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     function deposit(uint256 assets, address receiver) public override nonReentrant whenNotPaused returns (uint256) {
-        require(assets >= MIN_DEPOSIT, "MIN_DEPOSIT");
-        require(_poolKeySet, "POOL_KEY_NOT_SET");
+        if (assets < MIN_DEPOSIT) revert MinDeposit();
+        if (!_poolKeySet) revert PoolKeyNotSet();
         _bootstrapAndCheckNav();
         _pullReserveProceedsBoth();
-        if (maxTVL > 0) require(totalAssets() + assets <= maxTVL, "TVL_CAP");
+        if (maxTVL > 0 && totalAssets() + assets > maxTVL) revert TvlCap();
         if (balanceOf(receiver) == 0) totalDepositors++;
 
         uint256 shares = previewDeposit(assets);
@@ -450,12 +382,12 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         whenNotPaused
         returns (uint256 assets)
     {
-        require(_poolKeySet, "POOL_KEY_NOT_SET");
+        if (!_poolKeySet) revert PoolKeyNotSet();
         _bootstrapAndCheckNav();
         _pullReserveProceedsBoth();
         assets = previewMint(shares);
-        require(assets >= MIN_DEPOSIT, "MIN_DEPOSIT");
-        if (maxTVL > 0) require(totalAssets() + assets <= maxTVL, "TVL_CAP");
+        if (assets < MIN_DEPOSIT) revert MinDeposit();
+        if (maxTVL > 0 && totalAssets() + assets > maxTVL) revert TvlCap();
         if (balanceOf(receiver) == 0) totalDepositors++;
 
         _deposit(msg.sender, receiver, assets, shares);
@@ -477,12 +409,12 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         uint256 minSharesOut,
         uint256 deadline
     ) external nonReentrant whenNotPaused returns (uint256 shares) {
-        require(assets >= MIN_DEPOSIT, "MIN_DEPOSIT");
-        require(_poolKeySet, "POOL_KEY_NOT_SET");
-        require(assetsToSwap <= assets, "SWAP_TOO_LARGE");
+        if (assets < MIN_DEPOSIT) revert MinDeposit();
+        if (!_poolKeySet) revert PoolKeyNotSet();
+        if (assetsToSwap > assets) revert SwapTooLarge();
         _bootstrapAndCheckNav();
         _pullReserveProceedsBoth();
-        if (maxTVL > 0) require(totalAssets() + assets <= maxTVL, "TVL_CAP");
+        if (maxTVL > 0 && totalAssets() + assets > maxTVL) revert TvlCap();
 
         // Snapshot BEFORE pulling assets so existing-LP NAV is the baseline.
         uint256 totalBefore = totalAssets();
@@ -495,11 +427,11 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         }
 
         uint128 liquidity = _deployBalancedLiquidity(minLiquidity);
-        require(liquidity >= minLiquidity, "MIN_LIQUIDITY");
+        if (liquidity < minLiquidity) revert MinLiquidity();
 
         uint256 totalAfter = totalAssets();
         uint256 netAdded = totalAfter > totalBefore ? totalAfter - totalBefore : 0;
-        require(netAdded > 0, "NO_NET_VALUE_ADDED");
+        if (netAdded == 0) revert NoNetValueAdded();
 
         // ERC-4626 virtual-share formula, with `netAdded` standing in for `assets`
         // and the pre-deposit NAV used as the denominator.
@@ -512,8 +444,8 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
                 Math.Rounding.Floor
             );
         }
-        require(shares >= minSharesOut, "MIN_SHARES_OUT");
-        require(shares > 0, "ZERO_SHARES");
+        if (shares < minSharesOut) revert MinSharesOut();
+        if (shares == 0) revert ZeroShares();
 
         if (balanceOf(receiver) == 0) totalDepositors++;
         _mint(receiver, shares);
@@ -533,7 +465,7 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         _pullReserveProceedsBoth();
         shares = previewWithdraw(assets);
         _prepareWithdraw(assets);
-        require(IERC20(asset()).balanceOf(address(this)) >= assets, "INSUFFICIENT_ASSET_USE_ZAP");
+        if (IERC20(asset()).balanceOf(address(this)) < assets) revert InsufficientAssetUseZap();
         _withdraw(msg.sender, receiver, owner, assets, shares);
         if (balanceOf(owner) == 0 && totalDepositors > 0) totalDepositors--;
     }
@@ -549,7 +481,7 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         _pullReserveProceedsBoth();
         assets = previewRedeem(shares);
         _prepareWithdraw(assets);
-        require(IERC20(asset()).balanceOf(address(this)) >= assets, "INSUFFICIENT_ASSET_USE_ZAP");
+        if (IERC20(asset()).balanceOf(address(this)) < assets) revert InsufficientAssetUseZap();
         _withdraw(msg.sender, receiver, owner, assets, shares);
         if (balanceOf(owner) == 0 && totalDepositors > 0) totalDepositors--;
     }
@@ -597,9 +529,9 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         uint256 minAmountOut,
         uint256 deadline
     ) internal returns (uint256 amountOut) {
-        require(zapRouter != address(0), "ZAP_ROUTER_NOT_SET");
-        require(deadline >= block.timestamp, "DEADLINE");
-        require(amountInMax <= type(uint160).max, "AMOUNT_TOO_LARGE");
+        if (zapRouter == address(0)) revert ZapRouterNotSet();
+        if (deadline < block.timestamp) revert Deadline();
+        if (amountInMax > type(uint160).max) revert AmountTooLarge();
 
         uint256 outBefore = IERC20(tokenOut).balanceOf(address(this));
         IERC20(tokenIn).forceApprove(zapRouter, 0);
@@ -608,71 +540,32 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         IERC20(tokenIn).forceApprove(zapRouter, 0);
 
         amountOut = IERC20(tokenOut).balanceOf(address(this)) - outBefore;
-        require(amountOut >= minAmountOut, "MIN_ZAP_OUT");
+        if (amountOut < minAmountOut) revert MinZapOut();
         emit ZapExecuted(tokenIn, tokenOut, amountInMax, amountOut);
     }
 
     function _deployBalancedLiquidity(uint256 minLiquidity) internal returns (uint128 liquidity) {
         if (!_poolKeySet) return 0;
 
-        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolKey.toId());
-        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(tickLower);
-        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(tickUpper);
-        // Out-of-range: refuse to mint LP. Soft-fail when the caller did not
-        // require a minimum (e.g. plain `deposit()` / `mint()` paths) so the
-        // vault can hold idle inventory until the price re-enters range.
-        // Strict callers (depositWithZap, rebalance) pass minLiquidity > 0
-        // and still revert here.
-        if (sqrtPriceX96 < sqrtLower || sqrtPriceX96 >= sqrtUpper) {
-            require(minLiquidity == 0, "RANGE_NOT_ACTIVE");
-            return 0;
-        }
-
-        address token0 = Currency.unwrap(poolKey.currency0);
-        address token1 = Currency.unwrap(poolKey.currency1);
-        uint256 amount0Max = IERC20(token0).balanceOf(address(this));
-        uint256 amount1Max = IERC20(token1).balanceOf(address(this));
-
-        liquidity = LiquidityAmounts.getLiquidityForAmounts(
-            sqrtPriceX96, sqrtLower, sqrtUpper, amount0Max, amount1Max
+        uint256 spent0;
+        uint256 spent1;
+        uint256 newTokenId;
+        (liquidity, spent0, spent1, newTokenId) = VaultLP.deployLiquidity(
+            VaultLP.DeployArgs({
+                poolMgr: poolManager,
+                pm: positionManager,
+                key: poolKey,
+                tickLower: tickLower,
+                tickUpper: tickUpper,
+                positionTokenId: positionTokenId,
+                minLiquidity: minLiquidity,
+                deadline: block.timestamp + txDeadlineSeconds,
+                permit2: permit2
+            })
         );
-        if (liquidity == 0) {
-            require(minLiquidity == 0, "MIN_LIQUIDITY");
-            return 0;
-        }
-        require(liquidity >= minLiquidity, "MIN_LIQUIDITY");
+        if (liquidity == 0) return 0;
 
-        require(amount0Max <= type(uint128).max && amount1Max <= type(uint128).max, "AMOUNT_TOO_LARGE");
-        uint256 balance0Before = IERC20(token0).balanceOf(address(this));
-        uint256 balance1Before = IERC20(token1).balanceOf(address(this));
-
-        bytes memory actions;
-        bytes[] memory params = new bytes[](2);
-        if (positionTokenId == 0) {
-            actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
-            params[0] = abi.encode(
-                poolKey,
-                tickLower,
-                tickUpper,
-                liquidity,
-                uint128(amount0Max),
-                uint128(amount1Max),
-                address(this),
-                ""
-            );
-            positionTokenId = positionManager.nextTokenId();
-        } else {
-            actions = abi.encodePacked(uint8(Actions.INCREASE_LIQUIDITY), uint8(Actions.SETTLE_PAIR));
-            params[0] = abi.encode(positionTokenId, liquidity, uint128(amount0Max), uint128(amount1Max), "");
-        }
-        params[1] = abi.encode(poolKey.currency0, poolKey.currency1);
-
-        _approveForPositionManager(amount0Max, amount1Max);
-        positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp + txDeadlineSeconds);
-
-        uint256 spent0 = balance0Before - IERC20(token0).balanceOf(address(this));
-        uint256 spent1 = balance1Before - IERC20(token1).balanceOf(address(this));
-
+        positionTokenId = newTokenId;
         totalLiquidityDeployed += liquidity;
         assetsDeployed += assetIsToken0 ? spent0 : spent1;
         emit LiquidityDeployed(spent0, spent1, liquidity);
@@ -694,33 +587,13 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         uint256 deadline
     ) internal {
         if (IERC20(asset()).balanceOf(address(this)) >= assetsNeeded) return;
-        require(maxOtherToSwap > 0, "OTHER_SWAP_REQUIRED");
+        if (maxOtherToSwap == 0) revert OtherSwapRequired();
         address other = _otherToken();
         uint256 otherBalance = IERC20(other).balanceOf(address(this));
         uint256 amountToSwap = otherBalance < maxOtherToSwap ? otherBalance : maxOtherToSwap;
-        require(amountToSwap > 0, "NO_OTHER_TOKEN");
+        if (amountToSwap == 0) revert NoOtherToken();
         _executeZap(other, amountToSwap, asset(), minAssetOut, deadline);
-        require(IERC20(asset()).balanceOf(address(this)) >= assetsNeeded, "INSUFFICIENT_ASSET_OUT");
-    }
-
-    function _approveForPositionManager(uint256 amount0, uint256 amount1) internal {
-        if (permit2 != address(0)) {
-            IAllowanceTransfer(permit2).approve(
-                Currency.unwrap(poolKey.currency0),
-                address(positionManager),
-                uint160(amount0),
-                uint48(block.timestamp + txDeadlineSeconds)
-            );
-            IAllowanceTransfer(permit2).approve(
-                Currency.unwrap(poolKey.currency1),
-                address(positionManager),
-                uint160(amount1),
-                uint48(block.timestamp + txDeadlineSeconds)
-            );
-        } else {
-            IERC20(Currency.unwrap(poolKey.currency0)).forceApprove(address(positionManager), amount0);
-            IERC20(Currency.unwrap(poolKey.currency1)).forceApprove(address(positionManager), amount1);
-        }
+        if (IERC20(asset()).balanceOf(address(this)) < assetsNeeded) revert InsufficientAssetOut();
     }
 
     function _removeLiquidity(uint256 proportion) internal {
@@ -729,21 +602,19 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         uint128 liquidityToRemove = uint128(totalLiquidityDeployed.mulDiv(proportion, 1e18));
         if (liquidityToRemove == 0) return;
 
-        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolKey.toId());
-        uint160 sqrtLower = TickMath.getSqrtPriceAtTick(tickLower);
-        uint160 sqrtUpper = TickMath.getSqrtPriceAtTick(tickUpper);
-        (uint256 exp0, uint256 exp1) = LiquidityAmounts.getAmountsForLiquidity(
-            sqrtPriceX96, sqrtLower, sqrtUpper, liquidityToRemove
+        (uint256 exp0, uint256 exp1) = VaultLP.removeLiquidity(
+            VaultLP.RemoveArgs({
+                poolMgr: poolManager,
+                pm: positionManager,
+                key: poolKey,
+                tickLower: tickLower,
+                tickUpper: tickUpper,
+                positionTokenId: positionTokenId,
+                liquidityToRemove: liquidityToRemove,
+                slippageBps: removeLiquiditySlippageBps,
+                deadline: block.timestamp + txDeadlineSeconds
+            })
         );
-        uint256 amount0Min = exp0 * (10_000 - removeLiquiditySlippageBps) / 10_000;
-        uint256 amount1Min = exp1 * (10_000 - removeLiquiditySlippageBps) / 10_000;
-
-        bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-        bytes[] memory params = new bytes[](2);
-        params[0] = abi.encode(positionTokenId, liquidityToRemove, amount0Min, amount1Min, "");
-        params[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(this));
-
-        positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp + txDeadlineSeconds);
 
         totalLiquidityDeployed -= liquidityToRemove;
         if (totalLiquidityDeployed == 0) positionTokenId = 0;
@@ -754,19 +625,16 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     function _collectYield() internal {
         if (positionTokenId == 0) return;
 
-        bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-        bytes[] memory params = new bytes[](2);
-        params[0] = abi.encode(positionTokenId, uint128(0), 0, 0, "");
-        params[1] = abi.encode(poolKey.currency0, poolKey.currency1, address(this));
-
-        uint256 assetBefore = IERC20(asset()).balanceOf(address(this));
         address other = _otherToken();
-        uint256 otherBefore = IERC20(other).balanceOf(address(this));
+        (uint256 assetGain, uint256 otherGain) = VaultLP.collectFees(
+            positionManager,
+            poolKey,
+            positionTokenId,
+            block.timestamp + txDeadlineSeconds,
+            asset(),
+            other
+        );
 
-        positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp + txDeadlineSeconds);
-
-        uint256 assetGain = IERC20(asset()).balanceOf(address(this)) - assetBefore;
-        uint256 otherGain = IERC20(other).balanceOf(address(this)) - otherBefore;
         if (otherGain > 0) {
             otherTokenYieldCollected += otherGain;
             emit OtherTokenYieldCollected(otherGain, block.timestamp);
@@ -791,18 +659,17 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     function setPoolKey(PoolKey calldata _poolKey) external onlyOwner {
-        require(!_poolKeySet, "ALREADY_SET");
+        if (_poolKeySet) revert AlreadySet();
         // Reject native-ETH pools. Vault, hook and zap adapter all assume
         // ERC-20 currencies (forceApprove, transferFrom, balanceOf). Native
         // support is a separate, larger feature — fail closed here so a
         // misconfiguration cannot brick the vault silently.
-        require(
-            Currency.unwrap(_poolKey.currency0) != address(0)
-                && Currency.unwrap(_poolKey.currency1) != address(0),
-            "NATIVE_NOT_SUPPORTED"
-        );
+        if (
+            Currency.unwrap(_poolKey.currency0) == address(0)
+                || Currency.unwrap(_poolKey.currency1) == address(0)
+        ) revert NativeNotSupported();
         bool _isToken0 = Currency.unwrap(_poolKey.currency0) == asset();
-        require(_isToken0 || Currency.unwrap(_poolKey.currency1) == asset(), "ASSET_NOT_IN_POOL");
+        if (!_isToken0 && Currency.unwrap(_poolKey.currency1) != asset()) revert AssetNotInPool();
         poolKey = _poolKey;
         assetIsToken0 = _isToken0;
         _poolKeySet = true;
@@ -815,7 +682,7 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     function rebalance(int24 newTickLower, int24 newTickUpper, uint256 minLiquidity) external onlyOwner nonReentrant {
-        require(_poolKeySet, "POOL_KEY_NOT_SET");
+        if (!_poolKeySet) revert PoolKeyNotSet();
         _validateTicks(newTickLower, newTickUpper);
         _collectYield();
         if (totalLiquidityDeployed > 0 && positionTokenId != 0) {
@@ -833,8 +700,8 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     ///         active position cannot be silently moved without going through
     ///         the full {rebalance} (remove → redeploy) flow.
     function setInitialTicks(int24 newTickLower, int24 newTickUpper) external onlyOwner {
-        require(_poolKeySet, "POOL_KEY_NOT_SET");
-        require(totalLiquidityDeployed == 0 && positionTokenId == 0, "POSITION_LIVE");
+        if (!_poolKeySet) revert PoolKeyNotSet();
+        if (totalLiquidityDeployed != 0 || positionTokenId != 0) revert PositionLive();
         _validateTicks(newTickLower, newTickUpper);
         tickLower = newTickLower;
         tickUpper = newTickUpper;
@@ -844,24 +711,24 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     /// @dev Shared tick validation: ordering, spacing alignment, and TickMath bounds.
     ///      Caller must have already confirmed `_poolKeySet`.
     function _validateTicks(int24 lower, int24 upper) internal view {
-        require(lower < upper, "INVALID_TICKS");
+        if (lower >= upper) revert InvalidTicks();
         int24 spacing = poolKey.tickSpacing;
-        require(lower % spacing == 0 && upper % spacing == 0, "TICK_NOT_ALIGNED");
-        require(lower >= TickMath.MIN_TICK && upper <= TickMath.MAX_TICK, "TICK_OUT_OF_BOUNDS");
+        if (lower % spacing != 0 || upper % spacing != 0) revert TickNotAligned();
+        if (lower < TickMath.MIN_TICK || upper > TickMath.MAX_TICK) revert TickOutOfBounds();
     }
 
     function setZapRouter(address newRouter) external onlyOwner {
-        require(newRouter == address(0) || newRouter.code.length > 0, "NOT_CONTRACT");
+        if (newRouter != address(0) && newRouter.code.length == 0) revert NotContract();
         emit ZapRouterUpdated(zapRouter, newRouter);
         zapRouter = newRouter;
     }
 
     /// @notice Bind the reserve-sale hook (must equal poolKey.hooks for offers to fire).
     function setReserveHook(address newHook) external onlyOwner {
-        require(newHook == address(0) || newHook.code.length > 0, "NOT_CONTRACT");
+        if (newHook != address(0) && newHook.code.length == 0) revert NotContract();
         if (newHook != address(0)) {
-            require(_poolKeySet, "POOL_KEY_NOT_SET");
-            require(newHook == address(poolKey.hooks), "HOOK_MISMATCH");
+            if (!_poolKeySet) revert PoolKeyNotSet();
+            if (newHook != address(poolKey.hooks)) revert HookMismatch();
         }
         emit ReserveHookUpdated(reserveHook, newHook);
         reserveHook = newHook;
@@ -870,7 +737,7 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     /// @notice Bind (or unbind) the BootstrapRewards bonus program. Setting
     ///         to address(0) disables auto-poke; non-zero must be a contract.
     function setBootstrapRewards(address newRewards) external onlyOwner {
-        require(newRewards == address(0) || newRewards.code.length > 0, "NOT_CONTRACT");
+        if (newRewards != address(0) && newRewards.code.length == 0) revert NotContract();
         emit BootstrapRewardsUpdated(bootstrapRewards, newRewards);
         bootstrapRewards = newRewards;
     }
@@ -880,9 +747,9 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     ///         guard. Owner-only because re-anchoring effectively re-prices
     ///         pending deposits/redemptions; it must not be permissionless.
     function refreshNavReference() external onlyOwner {
-        require(_poolKeySet, "POOL_KEY_NOT_SET");
+        if (!_poolKeySet) revert PoolKeyNotSet();
         (uint160 spot,,,) = poolManager.getSlot0(poolKey.toId());
-        require(spot != 0, "POOL_NOT_INIT");
+        if (spot == 0) revert PoolNotInit();
         uint160 old = navReferenceSqrtPriceX96;
         navReferenceSqrtPriceX96 = spot;
         emit NavReferenceRefreshed(old, spot);
@@ -891,7 +758,7 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     /// @notice Update the NAV deviation tolerance. Bps of PRICE deviation
     ///         (token1/token0). Capped at MAX_NAV_DEVIATION_CAP.
     function setMaxNavDeviationBps(uint256 newBps) external onlyOwner {
-        require(newBps <= MAX_NAV_DEVIATION_CAP, "BPS_TOO_HIGH");
+        if (newBps > MAX_NAV_DEVIATION_CAP) revert BpsTooHigh();
         emit MaxNavDeviationBpsUpdated(maxNavDeviationBps, newBps);
         maxNavDeviationBps = newBps;
     }
@@ -931,9 +798,9 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         ReservePricingMode mode,
         bool useMode
     ) internal {
-        require(_poolKeySet, "POOL_KEY_NOT_SET");
-        require(reserveHook != address(0), "HOOK_NOT_SET");
-        require(sellAmount > 0, "ZERO_AMOUNT");
+        if (!_poolKeySet) revert PoolKeyNotSet();
+        if (reserveHook == address(0)) revert HookNotSet();
+        if (sellAmount == 0) revert ZeroAmount();
         IERC20 tok = IERC20(Currency.unwrap(sellCurrency));
         tok.forceApprove(reserveHook, 0);
         tok.forceApprove(reserveHook, sellAmount);
@@ -952,14 +819,14 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
 
     /// @notice Cancel the active reserve offer; remaining inventory returns to vault.
     function cancelReserveOffer(Currency sellCurrency) external onlyOwner nonReentrant returns (uint128 returned) {
-        require(reserveHook != address(0), "HOOK_NOT_SET");
+        if (reserveHook == address(0)) revert HookNotSet();
         returned = IReserveHook(reserveHook).cancelReserveOffer(poolKey);
         emit ReserveOfferReturned(Currency.unwrap(sellCurrency), returned);
     }
 
     /// @notice Pull accumulated proceeds (in `currency`) from the hook back into the vault.
     function collectReserveProceeds(Currency currency) external nonReentrant returns (uint256 amount) {
-        require(reserveHook != address(0), "HOOK_NOT_SET");
+        if (reserveHook == address(0)) revert HookNotSet();
         amount = IReserveHook(reserveHook).claimReserveProceeds(currency);
         if (amount > 0) emit ReserveProceedsCollected(Currency.unwrap(currency), amount);
     }
@@ -1000,9 +867,9 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
         ReservePricingMode mode,
         bool useMode
     ) internal {
-        require(_poolKeySet, "POOL_KEY_NOT_SET");
-        require(reserveHook != address(0), "HOOK_NOT_SET");
-        require(newSellAmount > 0, "ZERO_AMOUNT");
+        if (!_poolKeySet) revert PoolKeyNotSet();
+        if (reserveHook == address(0)) revert HookNotSet();
+        if (newSellAmount == 0) revert ZeroAmount();
 
         IReserveHook h = IReserveHook(reserveHook);
 
@@ -1040,13 +907,13 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     function setTreasury(address newTreasury) external onlyOwner {
-        require(newTreasury != address(0), "ZERO_ADDRESS");
+        if (newTreasury == address(0)) revert ZeroAddress();
         emit TreasuryUpdated(treasury, newTreasury);
         treasury = newTreasury;
     }
 
     function setPerformanceFeeBps(uint256 newBps) external onlyOwner {
-        require(newBps <= 2000, "FEE_TOO_HIGH");
+        if (newBps > 2000) revert FeeTooHigh();
         emit PerformanceFeeUpdated(performanceFeeBps, newBps);
         performanceFeeBps = newBps;
     }
@@ -1059,13 +926,13 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     function setRemoveLiquiditySlippageBps(uint256 newBps) external onlyOwner {
         // Hard cap at 1% (100 bps). Withdraw paths must not silently eat more
         // than 1% of NAV due to position-removal slippage; depositors trust this.
-        require(newBps <= 100, "SLIPPAGE_TOO_HIGH");
+        if (newBps > 100) revert SlippageTooHigh();
         emit RemoveLiquiditySlippageBpsUpdated(removeLiquiditySlippageBps, newBps);
         removeLiquiditySlippageBps = newBps;
     }
 
     function setTxDeadlineSeconds(uint256 newSeconds) external onlyOwner {
-        require(newSeconds > 0 && newSeconds <= 3_600, "DEADLINE_OUT_OF_RANGE");
+        if (newSeconds == 0 || newSeconds > 3_600) revert DeadlineOutOfRange();
         emit TxDeadlineUpdated(txDeadlineSeconds, newSeconds);
         txDeadlineSeconds = newSeconds;
     }
@@ -1078,10 +945,10 @@ contract LiquidityVaultV2 is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     ///         reward forwarding). The vault is ERC-20-only; any ETH balance
     ///         here is unintended dust and is not part of NAV.
     function rescueNative(address payable to, uint256 amount) external onlyOwner nonReentrant {
-        require(to != address(0), "ZERO_ADDRESS");
-        require(amount <= address(this).balance, "AMOUNT_EXCEEDS_BALANCE");
+        if (to == address(0)) revert ZeroAddress();
+        if (amount > address(this).balance) revert AmountExceedsBalance();
         (bool ok, ) = to.call{value: amount}("");
-        require(ok, "NATIVE_TRANSFER_FAILED");
+        if (!ok) revert NativeTransferFailed();
         emit NativeRescued(to, amount);
     }
 

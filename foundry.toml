@@ -5,6 +5,7 @@ libs = ["lib"]
 optimizer = true
 optimizer_runs = 200
 via_ir = true
+bytecode_hash = "none"
 
 [profile.default.fuzz]
 runs = 1000

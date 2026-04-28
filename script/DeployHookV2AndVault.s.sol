@@ -94,6 +94,22 @@ contract DeployHookV2AndVault is Script {
             abi.encode(address(poolManager), expectedDistributor, deployerAddr)
         );
 
+        // ── Pre-broadcast salt sanity print ────────────────────────────────
+        // Required flag bits: beforeSwap (0x80) | afterSwap (0x40)
+        //                   | beforeSwapReturnsDelta (0x08)
+        //                   | afterSwapReturnsDelta  (0x04) = 0xCC
+        console2.log("=== HookV2 CREATE2 pre-broadcast ===");
+        console2.log("Required flag bits (low byte): 0xCC");
+        console2.log("Required flags (uint160):", uint256(flags));
+        console2.log("Mined salt:");
+        console2.logBytes32(salt);
+        console2.log("Predicted hook        :", hookAddr);
+        console2.log("Predicted hook low bts:", uint256(uint160(hookAddr) & 0xFF));
+        console2.log("Expected distributor  :", expectedDistributor);
+        console2.log("Deployer (Ledger)     :", deployerAddr);
+        console2.log("Deployer nonce        :", vm.getNonce(deployerAddr));
+        console2.log("====================================");
+
         vm.startBroadcast();
 
         // 1. FeeDistributor (hook address known but not yet deployed; we'll wire after).

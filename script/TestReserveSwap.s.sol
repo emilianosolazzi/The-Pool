@@ -11,6 +11,7 @@ import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {LiquidityVaultV2} from "../src/LiquidityVaultV2.sol";
 import {DynamicFeeHookV2} from "../src/DynamicFeeHookV2.sol";
@@ -72,6 +73,13 @@ contract TestReserveSwap is Script {
         return string(out);
     }
 
+    function _sharePrice1e18(LiquidityVaultV2 vault) internal view returns (uint256) {
+        if (vault.totalSupply() == 0) return 1e18;
+        uint256 oneShareUnit = 10 ** uint256(vault.decimals());
+        uint256 oneAssetUnit = 10 ** (uint256(vault.decimals()) - 6);
+        return Math.mulDiv(vault.convertToAssets(oneShareUnit), 1e18, oneAssetUnit);
+    }
+
     function run() external {
         address poolMgr = vm.envAddress("POOL_MANAGER");
         address weth    = vm.envAddress("TOKEN0");          // currency0
@@ -107,12 +115,13 @@ contract TestReserveSwap is Script {
         console2.log("\n==== STAGE 1: vault state pre-offer ====");
         uint256 vUsdc = IERC20(usdc).balanceOf(vaultA);
         uint256 vWeth = IERC20(weth).balanceOf(vaultA);
-        (uint256 tvl, uint256 sharePrice,,,, ) = vault.getVaultStats();
+        uint256 tvl = vault.totalAssets();
+        uint256 sharePrice = _sharePrice1e18(vault);
         console2.log("vault USDC balance:", vUsdc);
         console2.log("vault WETH balance:", vWeth);
         console2.log("totalAssets() (USDC):", tvl);
         console2.log("totalSupply() (shares):", vault.totalSupply());
-        console2.log("getVaultStats.sharePrice (1e18):", sharePrice);
+        console2.log("sharePrice (1e18):", sharePrice);
 
         // ---------- STAGE 2: post reserve offer ----------
         // Vault sells 50 USDC at a sqrtPrice ~1bp WORSE for vault (= better for swapper).
@@ -187,10 +196,12 @@ contract TestReserveSwap is Script {
         console2.log("vault WETH balance:", IERC20(weth).balanceOf(vaultA));
 
         // ---------- STAGE 5: NAV + share-price after ----------
-        (uint256 tvl2, uint256 sp2,,, uint256 yc, ) = vault.getVaultStats();
+        uint256 tvl2 = vault.totalAssets();
+        uint256 sp2 = _sharePrice1e18(vault);
+        uint256 yc = vault.totalYieldCollected();
         console2.log("\n==== STAGE 5: vault NAV & share price ====");
         console2.log("totalAssets() (USDC):", tvl2);
-        console2.log("getVaultStats.sharePrice (1e18):", sp2);
+        console2.log("sharePrice (1e18):", sp2);
         console2.log("totalYieldCollected:", yc);
         console2.log("totalSupply (shares):", vault.totalSupply());
         console2.log("delta totalAssets (post - pre):", int256(tvl2) - int256(tvl));

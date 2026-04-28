@@ -101,6 +101,9 @@ $forgeArgs = @(
     "script", "script/DeployHookV2AndVault.s.sol",
     "--rpc-url", $rpc,
     "--ledger",
+    # Derivation path for SENDER (0xe5f5Ef79...). Foundry's default
+    # m/44'/60'/0'/0/0 maps to a different account on this device.
+    "--mnemonic-derivation-paths", "m/44'/60'/2'/0/0",
     "--sender", $sender,
     "--broadcast",
     "--verify",
