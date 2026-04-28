@@ -24,8 +24,10 @@ npm install
 ```bash
 export ARBITRUM_RPC_URL=https://arb1.arbitrum.io/rpc
 export KEEPER_PRIVATE_KEY=0x...        # vault owner key
-export VAULT=0x...                     # LiquidityVaultV2
-export HOOK=0x...                      # DynamicFeeHookV2
+# Production (Arbitrum One, V2.1, Apr 2026):
+export VAULT=0xf79c2dc829cd3a2d8ceec353bdb1b2414ba1eee0       # LiquidityVaultV2
+export VAULT_LENS=0x12e86890b75fdee22a35be66550373936d883551  # VaultLens (vaultStatus reads)
+export HOOK=0x486579DE6391053Df88a073CeBd673dd545200cC        # DynamicFeeHookV2
 
 # Tunables (defaults shown)
 export SPREAD_BPS=25

@@ -13,6 +13,7 @@
  *   ARBITRUM_RPC_URL       JSON-RPC endpoint
  *   KEEPER_PRIVATE_KEY     0x-prefixed private key for the vault owner
  *   VAULT                  LiquidityVaultV2 address
+ *   VAULT_LENS             VaultLens address (provides vaultStatus(address))
  *   HOOK                   DynamicFeeHookV2 address
  *
  * Tunables (all optional):
@@ -43,6 +44,7 @@ const RPC_URL = mustEnv('ARBITRUM_RPC_URL');
 const KEEPER_PRIVATE_KEY = mustEnv('KEEPER_PRIVATE_KEY') as `0x${string}`;
 
 const VAULT = mustEnv('VAULT') as Address;
+const VAULT_LENS = mustEnv('VAULT_LENS') as Address;
 const HOOK = mustEnv('HOOK') as Address;
 
 const DRY_RUN = process.env.DRY_RUN === 'true';
@@ -88,9 +90,12 @@ const vaultAbi = parseAbi([
   'function poolKey() view returns (address currency0,address currency1,uint24 fee,int24 tickSpacing,address hooks)',
   'function asset() view returns (address)',
   'function owner() view returns (address)',
-  'function vaultStatus() view returns (uint8)',
   'function offerReserveToHookWithMode(address sellCurrency,uint128 sellAmount,uint160 vaultSqrtPriceX96,uint64 expiry,uint8 mode)',
   'function rebalanceOfferWithMode(address sellCurrency,uint128 sellAmount,uint160 vaultSqrtPriceX96,uint64 expiry,uint8 mode)',
+]);
+
+const vaultLensAbi = parseAbi([
+  'function vaultStatus(address vault) view returns (uint8)',
 ]);
 
 const hookAbi = parseAbi([
@@ -274,7 +279,12 @@ async function tick() {
   const [asset, ownerAddr, vaultStatus] = await Promise.all([
     publicClient.readContract({ address: VAULT, abi: vaultAbi, functionName: 'asset' }),
     publicClient.readContract({ address: VAULT, abi: vaultAbi, functionName: 'owner' }),
-    publicClient.readContract({ address: VAULT, abi: vaultAbi, functionName: 'vaultStatus' }),
+    publicClient.readContract({
+      address: VAULT_LENS,
+      abi: vaultLensAbi,
+      functionName: 'vaultStatus',
+      args: [VAULT],
+    }),
   ]);
 
   if (ownerAddr.toLowerCase() !== account.address.toLowerCase()) {

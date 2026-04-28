@@ -14,6 +14,7 @@ const envAddr = (key: string): Address | undefined => {
 
 export interface Deployment {
   vault?: Address;
+  lens?: Address;
   hook?: Address;
   distributor?: Address;
   bootstrap?: Address;
@@ -27,14 +28,17 @@ export interface Deployment {
 
 export const DEPLOYMENTS: Record<AppChainId, Deployment> = {
   [arbitrum.id]: {
+    // V2.1 production set (Phase C, Apr 2026). See repo memory for history.
     vault: envAddr('NEXT_PUBLIC_VAULT_ARB_ONE') ??
-      ('0x02D5a1340D378695D50FF7dE0F5778018952c5EA' as Address),
+      ('0xf79c2dc829cd3a2d8ceec353bdb1b2414ba1eee0' as Address),
+    lens: envAddr('NEXT_PUBLIC_VAULT_LENS_ARB_ONE') ??
+      ('0x12e86890b75fdee22a35be66550373936d883551' as Address),
     hook: envAddr('NEXT_PUBLIC_HOOK_ARB_ONE') ??
-      ('0x453CFf45DAC5116f8D49f7cfE6AEB56107a780c4' as Address),
+      ('0x486579DE6391053Df88a073CeBd673dd545200cC' as Address),
     distributor: envAddr('NEXT_PUBLIC_DISTRIBUTOR_ARB_ONE') ??
-      ('0x9e3aAb5DdBF536c087319431afCAf2F1160942e1' as Address),
-    bootstrap: envAddr('NEXT_PUBLIC_BOOTSTRAP_ARB_ONE') ??
-      ('0x029C2FEeB98050295C108E370fa74081ed58F978' as Address),
+      ('0x5757DA9014EE91055b244322a207EE6F066378B0' as Address),
+    // Bootstrap not yet deployed for V2.1 — leave env-only, no fallback.
+    bootstrap: envAddr('NEXT_PUBLIC_BOOTSTRAP_ARB_ONE'),
     poolManager: envAddr('NEXT_PUBLIC_POOL_MANAGER_ARB_ONE') ??
       ('0x360e68faccca8ca495c1b759fd9eee466db9fb32' as Address),
     asset: envAddr('NEXT_PUBLIC_ASSET_ARB_ONE') ??
@@ -47,6 +51,7 @@ export const DEPLOYMENTS: Record<AppChainId, Deployment> = {
   },
   [arbitrumSepolia.id]: {
     vault: envAddr('NEXT_PUBLIC_VAULT_ARB_SEPOLIA'),
+    lens: envAddr('NEXT_PUBLIC_VAULT_LENS_ARB_SEPOLIA'),
     hook: envAddr('NEXT_PUBLIC_HOOK_ARB_SEPOLIA'),
     distributor: envAddr('NEXT_PUBLIC_DISTRIBUTOR_ARB_SEPOLIA'),
     bootstrap: envAddr('NEXT_PUBLIC_BOOTSTRAP_ARB_SEPOLIA'),
