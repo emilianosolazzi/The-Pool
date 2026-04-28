@@ -151,6 +151,25 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
   const symbol0 = (tokenMeta?.[2]?.result as string | undefined) ?? 'token0';
   const symbol1 = (tokenMeta?.[3]?.result as string | undefined) ?? 'token1';
 
+  // ── Vault inventory ─────────────────────────────────────────────────────
+  // The offer is escrowed FROM the vault's own ERC-20 balance (not the
+  // owner's wallet). If the vault is short of the chosen sell-side, the
+  // post will revert in safeTransferFrom. Surface the live balances so
+  // the operator can size correctly without having to read on Arbiscan.
+  const { data: vaultBalances, refetch: refetchVaultBalances } = useReadContracts({
+    allowFailure: true,
+    contracts:
+      enabled && poolKey && vault
+        ? ([
+            { address: poolKey.currency0, abi: erc20Abi, functionName: 'balanceOf', args: [vault], chainId },
+            { address: poolKey.currency1, abi: erc20Abi, functionName: 'balanceOf', args: [vault], chainId },
+          ] as const)
+        : [],
+    query: { enabled: enabled && Boolean(poolKey && vault), refetchInterval: 30_000 },
+  });
+  const vaultBal0 = vaultBalances?.[0]?.result as bigint | undefined;
+  const vaultBal1 = vaultBalances?.[1]?.result as bigint | undefined;
+
   // ── Live offer + health (drives status + suggest-price) ─────────────────
   const { data: hookReads, refetch: refetchHook } = useReadContracts({
     allowFailure: true,
@@ -253,12 +272,21 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
     hash: txHash,
     chainId,
   });
-  // After confirmation, refresh hook reads.
+  // After confirmation, refresh hook reads + vault balances.
   useEffect(() => {
     if (isMined) {
       refetchHook();
+      refetchVaultBalances();
     }
-  }, [isMined, refetchHook]);
+  }, [isMined, refetchHook, refetchVaultBalances]);
+
+  const sellVaultBalance: bigint | undefined =
+    side === 'sell1' ? vaultBal1 : vaultBal0;
+
+  const insufficient =
+    sizeUnits !== undefined &&
+    sellVaultBalance !== undefined &&
+    sizeUnits > sellVaultBalance;
 
   const canPost =
     isOwner &&
@@ -266,6 +294,7 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
     !!sellCurrency &&
     !!sizeUnits &&
     sizeUnits > 0n &&
+    !insufficient &&
     !!vaultSqrt &&
     !isPending &&
     !isMining;
@@ -389,14 +418,47 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
               />
             </div>
 
-            <Label>Size ({sellSymbol})</Label>
+            <div className="mb-1.5 flex items-end justify-between gap-3">
+              <Label>Size ({sellSymbol})</Label>
+              <div className="text-[11px] text-zinc-500">
+                Vault balance:{' '}
+                <button
+                  type="button"
+                  className="font-mono text-zinc-300 hover:text-accent-400"
+                  onClick={() => {
+                    if (sellVaultBalance !== undefined) {
+                      // Render at full precision so parseUnits round-trips.
+                      const whole = sellVaultBalance / 10n ** BigInt(sellDecimals);
+                      const frac = sellVaultBalance % 10n ** BigInt(sellDecimals);
+                      const fracStr = frac
+                        .toString()
+                        .padStart(sellDecimals, '0')
+                        .replace(/0+$/, '');
+                      setSize(fracStr ? `${whole}.${fracStr}` : whole.toString());
+                    }
+                  }}
+                  disabled={sellVaultBalance === undefined}
+                  title="Set size to full vault balance of this currency"
+                >
+                  {fmtUnits(sellVaultBalance, sellDecimals, 6)} {sellSymbol}
+                </button>
+              </div>
+            </div>
             <input
-              className="input mb-4"
+              className={`input mb-1 ${insufficient ? 'border-amber-500/60' : ''}`}
               inputMode="decimal"
               placeholder={`e.g. 0.1 ${sellSymbol}`}
               value={size}
               onChange={(e) => setSize(e.target.value)}
             />
+            {insufficient ? (
+              <p className="mb-4 text-xs text-amber-300">
+                Vault holds only {fmtUnits(sellVaultBalance, sellDecimals, 6)} {sellSymbol}.
+                Posting will revert. Either reduce size, claim proceeds first, or send {sellSymbol} to the vault directly (donates to LPs — no shares minted).
+              </p>
+            ) : (
+              <div className="mb-4" />
+            )}
 
             <Label>Pricing mode</Label>
             <div className="mb-4 grid gap-2 md:grid-cols-2">
