@@ -55,6 +55,12 @@ const VAULT = mustEnv('VAULT') as Address;
 const VAULT_LENS = mustEnv('VAULT_LENS') as Address;
 const HOOK = mustEnv('HOOK') as Address;
 
+// Optional: when the vault's owner has been transferred to a
+// VaultOwnerController, point writes (offer/rebalance/cancel/collect) at
+// the controller while reads stay on the vault. Defaults to VAULT for
+// back-compat with the pre-controller deployment.
+const KEEPER_WRITE_TARGET = (process.env.KEEPER_WRITE_TARGET ?? VAULT) as Address;
+
 const DRY_RUN = process.env.DRY_RUN === 'true';
 
 const SPREAD_BPS = BigInt(process.env.SPREAD_BPS ?? '25');
@@ -338,7 +344,7 @@ async function sendOrPrint(
       const [gas, gasPrice] = await Promise.all([
         publicClient.estimateContractGas({
           account,
-          address: VAULT,
+          address: KEEPER_WRITE_TARGET,
           abi: vaultAbi,
           functionName,
           args,
@@ -375,7 +381,7 @@ async function sendOrPrint(
 
   const { request } = await publicClient.simulateContract({
     account,
-    address: VAULT,
+    address: KEEPER_WRITE_TARGET,
     abi: vaultAbi,
     functionName,
     args,
@@ -454,10 +460,32 @@ async function tick() {
     );
   }
 
-  if (ownerAddr.toLowerCase() !== account.address.toLowerCase()) {
-    throw new Error(
-      `Keeper key ${account.address} is not vault owner ${ownerAddr}. ` +
-        `offerReserveToHookWithMode/rebalanceOfferWithMode are onlyOwner.`,
+  // Two modes:
+  //  1. Direct mode (KEEPER_WRITE_TARGET == VAULT): keeper EOA must be the
+  //     vault owner because the vault's reserve fns are onlyOwner.
+  //  2. Controller mode (KEEPER_WRITE_TARGET == VaultOwnerController): the
+  //     vault owner must be the controller. The keeper EOA is whitelisted
+  //     on the controller via setReserveKeeper(); the controller (not the
+  //     EOA) is the vault owner. We sanity-check that wiring here so a
+  //     misconfigured env fails fast instead of every tx reverting.
+  if (KEEPER_WRITE_TARGET.toLowerCase() === VAULT.toLowerCase()) {
+    if (ownerAddr.toLowerCase() !== account.address.toLowerCase()) {
+      throw new Error(
+        `Keeper key ${account.address} is not vault owner ${ownerAddr}. ` +
+          `offerReserveToHookWithMode/rebalanceOfferWithMode are onlyOwner. ` +
+          `If using a VaultOwnerController, set KEEPER_WRITE_TARGET=<controller>.`,
+      );
+    }
+  } else {
+    if (ownerAddr.toLowerCase() !== KEEPER_WRITE_TARGET.toLowerCase()) {
+      throw new Error(
+        `KEEPER_WRITE_TARGET=${KEEPER_WRITE_TARGET} but vault owner is ${ownerAddr}. ` +
+          `Run vault.transferOwnership(controller) and controller.acceptVaultOwnership() first.`,
+      );
+    }
+    console.log(
+      `[controller-mode] writes -> ${KEEPER_WRITE_TARGET}; vault owner = controller; ` +
+        `keeper EOA must be whitelisted via controller.setReserveKeeper(${account.address}, true).`,
     );
   }
 
