@@ -55,6 +55,25 @@ const MAX_OFFER_BPS_OF_IDLE = BigInt(process.env.MAX_OFFER_BPS_OF_IDLE ?? '500')
 const OFFER_TTL_SECONDS = BigInt(process.env.OFFER_TTL_SECONDS ?? '900');
 const MIN_SELL_AMOUNT = BigInt(process.env.MIN_SELL_AMOUNT ?? '1000000');
 
+// ── Tunable bounds ────────────────────────────────────────────────────
+// Reject obviously broken configurations at startup so a typo in env
+// can never produce a write that the contract will accept but is
+// economically nonsensical (e.g. 0% spread, 100%+ of idle, 0 TTL).
+if (SPREAD_BPS >= 20_000n) {
+  throw new Error(`SPREAD_BPS=${SPREAD_BPS} too large (must be < 20000)`);
+}
+if (MAX_OFFER_BPS_OF_IDLE === 0n || MAX_OFFER_BPS_OF_IDLE > 10_000n) {
+  throw new Error(
+    `MAX_OFFER_BPS_OF_IDLE=${MAX_OFFER_BPS_OF_IDLE} out of range (must be in (0, 10000])`,
+  );
+}
+if (OFFER_TTL_SECONDS === 0n) {
+  throw new Error('OFFER_TTL_SECONDS must be > 0');
+}
+if (REBALANCE_DRIFT_BPS === 0n) {
+  throw new Error('REBALANCE_DRIFT_BPS must be > 0 (else every tick rebalances)');
+}
+
 // Profitability guard. Skip a write if the *expected* spread profit on the
 // offer (in `asset` units) is below `gasCost * GAS_SAFETY_MULTIPLIER`,
 // where gasCost is priced in `asset` via ASSET_PER_NATIVE_E18 (asset units
@@ -90,6 +109,7 @@ const vaultAbi = parseAbi([
   'function poolKey() view returns (address currency0,address currency1,uint24 fee,int24 tickSpacing,address hooks)',
   'function asset() view returns (address)',
   'function owner() view returns (address)',
+  'function reserveHook() view returns (address)',
   'function offerReserveToHookWithMode(address sellCurrency,uint128 sellAmount,uint160 vaultSqrtPriceX96,uint64 expiry,uint8 mode)',
   'function rebalanceOfferWithMode(address sellCurrency,uint128 sellAmount,uint160 vaultSqrtPriceX96,uint64 expiry,uint8 mode)',
 ]);
@@ -100,6 +120,12 @@ const vaultLensAbi = parseAbi([
 
 const hookAbi = parseAbi([
   'function getOfferHealth((address currency0,address currency1,uint24 fee,int24 tickSpacing,address hooks) key,address vault) view returns (bool active,int256 driftBps,uint256 escrow0,uint256 escrow1,uint256 proceeds0,uint256 proceeds1,uint160 vaultSqrtPriceX96,uint160 poolSqrtPriceX96)',
+  // Storage-level offer view. NOTE: `active` here is the raw storage flag.
+  // The hook does NOT auto-clear it on expiry (`_tryFillReserve` just
+  // no-ops past `expiry`), so an expired offer still reports active=true
+  // and `createReserveOfferWithMode` would revert with OfferAlreadyActive.
+  // The keeper must inspect `expiry` and use the rebalance path in that case.
+  'function getOffer((address currency0,address currency1,uint24 fee,int24 tickSpacing,address hooks) key) view returns ((address sellCurrency,address buyCurrency,uint128 sellRemaining,uint160 vaultSqrtPriceX96,uint64 expiry,bool sellingCurrency1,bool active,uint8 pricingMode))',
   'function failedDistribution(address currency) view returns (uint256)',
 ]);
 
@@ -276,7 +302,7 @@ async function tick() {
     hooks: pkHooks,
   } as const;
 
-  const [asset, ownerAddr, vaultStatus] = await Promise.all([
+  const [asset, ownerAddr, vaultStatus, configuredReserveHook] = await Promise.all([
     publicClient.readContract({ address: VAULT, abi: vaultAbi, functionName: 'asset' }),
     publicClient.readContract({ address: VAULT, abi: vaultAbi, functionName: 'owner' }),
     publicClient.readContract({
@@ -285,7 +311,37 @@ async function tick() {
       functionName: 'vaultStatus',
       args: [VAULT],
     }),
+    publicClient.readContract({
+      address: VAULT,
+      abi: vaultAbi,
+      functionName: 'reserveHook',
+    }),
   ]);
+
+  // ── Env-mismatch guards ──────────────────────────────────────────
+  // A wrong HOOK env is not fund-stealing (writes go through the
+  // vault), but it lets the keeper read health from one hook and post
+  // offers that the vault routes to a different hook — producing
+  // failing or wasteful writes. Catch it before any write.
+  const hookEnvLower = HOOK.toLowerCase();
+  if (poolKey.hooks.toLowerCase() !== hookEnvLower) {
+    throw new Error(
+      `HOOK env ${HOOK} does not match poolKey.hooks ${poolKey.hooks}`,
+    );
+  }
+  if (configuredReserveHook.toLowerCase() !== hookEnvLower) {
+    throw new Error(
+      `HOOK env ${HOOK} does not match vault.reserveHook ${configuredReserveHook}`,
+    );
+  }
+  const assetLower = asset.toLowerCase();
+  const c0Lower = poolKey.currency0.toLowerCase();
+  const c1Lower = poolKey.currency1.toLowerCase();
+  if (assetLower !== c0Lower && assetLower !== c1Lower) {
+    throw new Error(
+      `Vault asset ${asset} is not pool currency0/currency1: ${poolKey.currency0}/${poolKey.currency1}`,
+    );
+  }
 
   if (ownerAddr.toLowerCase() !== account.address.toLowerCase()) {
     throw new Error(
@@ -376,7 +432,7 @@ async function tick() {
   }
 
   // Pick spread direction based on which side of the pool `asset` is on.
-  const sellingCurrency1 = asset.toLowerCase() === poolKey.currency1.toLowerCase();
+  const sellingCurrency1 = assetLower === c1Lower;
   const vaultSqrtPriceX96 = sellingCurrency1
     ? vaultSpreadSqrtForSellingCurrency1(poolSqrt, SPREAD_BPS)
     : vaultSpreadSqrtForSellingCurrency0(poolSqrt, SPREAD_BPS);
@@ -391,8 +447,37 @@ async function tick() {
     VAULT_SPREAD_MODE,
   ] as const;
 
+  // ── Expired-offer detection ─────────────────────────────────────
+  // The hook's `_tryFillReserve` only no-ops past expiry — it does NOT
+  // clear `offers[pid].active`. So `getOfferHealth.active` (which is
+  // the raw storage flag) can be true for an offer that is no longer
+  // fillable. If we tried to post a fresh offer in that state,
+  // `createReserveOfferWithMode` would revert with OfferAlreadyActive.
+  // Use the rebalance path, which atomically cancels-then-posts.
+  let onchainExpired = false;
+  if (active) {
+    const onchainOffer = await publicClient.readContract({
+      address: HOOK,
+      abi: hookAbi,
+      functionName: 'getOffer',
+      args: [poolKey],
+    });
+    const nowSec = BigInt(Math.floor(Date.now() / 1000));
+    if (onchainOffer.expiry !== 0n && nowSec >= onchainOffer.expiry) {
+      onchainExpired = true;
+      console.log(
+        `Active offer storage-flag is true but expired at ${onchainOffer.expiry} (now ${nowSec}). Rebalancing.`,
+      );
+    }
+  }
+
   if (!active) {
     await sendOrPrint('post VAULT_SPREAD reserve offer', 'offerReserveToHookWithMode', args);
+    return;
+  }
+
+  if (onchainExpired) {
+    await sendOrPrint('rebalance expired VAULT_SPREAD reserve offer', 'rebalanceOfferWithMode', args);
     return;
   }
 
