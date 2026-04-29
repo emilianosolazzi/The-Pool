@@ -82,21 +82,21 @@ const Q96 = 2n ** 96n;
  *
  * `direction` indicates the sign:
  *   - 'down' returns sqrtP * (10000 - bps) / 10000 (vault accepts a worse price)
- *   - 'up'   returns sqrtP * (10000 + bps) / 10000 (vault demands a better price)
+ *   - 'up'   returns sqrtP * (20000 + bps) / 20000 (vault demands a better price)
  *
- * Note: in sqrt-space, `bps` here is the half-spread on price — applying it
- * once to sqrt is a first-order approximation. For the small spreads used by
- * the desk (≤100 bps) this matches the cast playbook the user has been
- * running and is well within tick precision.
+ * Note: price = sqrtP², so a price spread of `bps` corresponds to about
+ * `bps / 2` in sqrt-space. We bake that factor of 2 into the divisor (20000
+ * instead of 10000) so that the SPREAD_BPS the owner enters is the *price*
+ * spread the AMM sees — this matches the keeper's math.
  */
 function applySqrtSpread(
   sqrtP: bigint,
   bps: number,
   direction: 'up' | 'down',
 ): bigint {
-  const num =
-    direction === 'down' ? BigInt(10_000 - Math.floor(bps)) : BigInt(10_000 + Math.floor(bps));
-  return (sqrtP * num) / 10_000n;
+  const spread = BigInt(Math.floor(bps));
+  const num = direction === 'down' ? 20_000n - spread : 20_000n + spread;
+  return (sqrtP * num) / 20_000n;
 }
 
 export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
@@ -255,13 +255,27 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
 
   // ── Suggest price ───────────────────────────────────────────────────────
   // VAULT_SPREAD gate (line ~422 of DynamicFeeHookV2): the vault price must
-  // sit on the side of the pool spot that lets the AMM cross it. For an
-  // exact-input zeroForOne swap (sell currency1) the gate is
-  // `poolSqrt >= vaultSqrt` → vaultSqrt should be slightly BELOW pool.
-  // For oneForZero (sell currency0) it's the inverse → ABOVE pool.
+  // sit on the side of the pool spot that lets the AMM cross it.
+  //
+  // VAULT_SPREAD (mode=1) — vault wants pool to cross the *worse-than-mid*
+  // direction so the desk earns spread:
+  //   sell currency1 (zeroForOne fills): poolSqrt >= vaultSqrt → vault BELOW
+  //   sell currency0 (oneForZero fills): poolSqrt <= vaultSqrt → vault ABOVE
+  //
+  // PRICE_IMPROVEMENT (mode=0) — vault offers a *better* price than the AMM
+  // mid, so the inequalities flip:
+  //   sell currency1: poolSqrt <= vaultSqrt → vault ABOVE
+  //   sell currency0: poolSqrt >= vaultSqrt → vault BELOW
   const suggest = () => {
     if (!poolSqrtP) return;
-    const direction: 'up' | 'down' = side === 'sell1' ? 'down' : 'up';
+    const direction: 'up' | 'down' =
+      mode === 1
+        ? side === 'sell1'
+          ? 'down'
+          : 'up'
+        : side === 'sell1'
+          ? 'up'
+          : 'down';
     const next = applySqrtSpread(poolSqrtP, spreadBps, direction);
     setVaultSqrtStr(next.toString());
   };

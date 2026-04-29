@@ -438,3 +438,12 @@ export const hookAbi = [
     ],
   },
 ] as const satisfies Abi;
+
+// FeeDistributor — owner-adjustable treasury share. UI must read this rather
+// than hardcode 20/80 because `setTreasuryShare` is callable by owner up to
+// MAX_TREASURY_SHARE = 50 (out of SHARE_DENOMINATOR = 100).
+export const distributorAbi = [
+  { type: 'function', name: 'treasuryShare', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'SHARE_DENOMINATOR', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'MAX_TREASURY_SHARE', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+] as const satisfies Abi;

@@ -30,6 +30,8 @@ import {
   universalRouterAbi,
   v4QuoterAbi,
   permit2Abi,
+  hookAbi,
+  distributorAbi,
 } from '@/lib/abis';
 import { fmtUnits } from '@/lib/format';
 import {
@@ -48,8 +50,10 @@ import {
 } from '@/lib/swap';
 
 const HOOK_FEE_BPS = 25n;          // DynamicFeeHookV2 base hook fee
-const TREASURY_SHARE_BPS = 2000n;  // FeeDistributor default 20%
-const LP_DONATION_BPS = 10_000n - TREASURY_SHARE_BPS;
+// Default split shown before on-chain reads resolve. The live split is read
+// from FeeDistributor.treasuryShare / SHARE_DENOMINATOR every render — the
+// owner can re-balance this up to MAX_TREASURY_SHARE (50%) at any time.
+const DEFAULT_TREASURY_SHARE_BPS = 2000n;
 const SLIPPAGE_PRESETS = [10, 50, 100]; // 0.1% / 0.5% / 1.0%
 
 interface SwapPanelProps {
@@ -224,8 +228,42 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
   const feeBasisDecimals = amountOut ? outputDecimals : inputDecimals;
   const feeBasisSymbol = amountOut ? outputSymbol : inputSymbol;
 
+  // ── Live fee split from FeeDistributor ─────────────────────────────────
+  // treasuryShare is owner-adjustable (0..MAX_TREASURY_SHARE=50 out of
+  // SHARE_DENOMINATOR=100). Read both so the displayed split survives any
+  // future setTreasuryShare without requiring a frontend redeploy.
+  const { data: distributorAddrData } = useReadContract({
+    address: hook,
+    abi: hookAbi,
+    functionName: 'feeDistributor',
+    chainId,
+    query: { enabled: supported && Boolean(hook), staleTime: 60_000 },
+  });
+  const distributorAddr = distributorAddrData as Address | undefined;
+  const { data: distReads } = useReadContracts({
+    contracts:
+      distributorAddr && distributorAddr !== ZERO
+        ? ([
+            { address: distributorAddr, abi: distributorAbi, functionName: 'treasuryShare', chainId },
+            { address: distributorAddr, abi: distributorAbi, functionName: 'SHARE_DENOMINATOR', chainId },
+          ] as const)
+        : [],
+    query: { enabled: Boolean(distributorAddr) && distributorAddr !== ZERO, staleTime: 60_000 },
+  });
+  const treasuryShareRaw = distReads?.[0]?.result as bigint | undefined;
+  const shareDenomRaw = distReads?.[1]?.result as bigint | undefined;
+  const treasuryShareBps = useMemo(() => {
+    if (treasuryShareRaw !== undefined && shareDenomRaw && shareDenomRaw > 0n) {
+      return (treasuryShareRaw * 10_000n) / shareDenomRaw;
+    }
+    return DEFAULT_TREASURY_SHARE_BPS;
+  }, [treasuryShareRaw, shareDenomRaw]);
+  const lpDonationBps = 10_000n - treasuryShareBps;
+  const treasuryPctLabel = `${(Number(treasuryShareBps) / 100).toFixed(treasuryShareBps % 100n === 0n ? 0 : 2)}%`;
+  const lpPctLabel = `${(Number(lpDonationBps) / 100).toFixed(lpDonationBps % 100n === 0n ? 0 : 2)}%`;
+
   const hookFee = (feeBasisAmount * HOOK_FEE_BPS) / 10_000n;
-  const treasuryAmount = (hookFee * TREASURY_SHARE_BPS) / 10_000n;
+  const treasuryAmount = (hookFee * treasuryShareBps) / 10_000n;
   const lpDonation = hookFee - treasuryAmount;
   const userShareOfDonation =
     userShares && totalShares && totalShares > 0n
@@ -517,12 +555,12 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
                 value={`${fmtUnits(hookFee, feeBasisDecimals, feeBasisDecimals === 6 ? 4 : 6)} ${feeBasisSymbol}`}
               />
               <Row
-                label="↳ Treasury (20%)"
+                label={`↳ Treasury (${treasuryPctLabel})`}
                 value={`${fmtUnits(treasuryAmount, feeBasisDecimals, feeBasisDecimals === 6 ? 4 : 6)} ${feeBasisSymbol}`}
                 muted
               />
               <Row
-                label="↳ LP donation (80%)"
+                label={`↳ LP donation (${lpPctLabel})`}
                 value={`${fmtUnits(lpDonation, feeBasisDecimals, feeBasisDecimals === 6 ? 4 : 6)} ${feeBasisSymbol}`}
                 muted
               />
