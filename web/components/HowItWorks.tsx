@@ -81,11 +81,14 @@ export function HowItWorks({ deployment, chainId }: { deployment: Deployment; ch
         <div className="card p-5 text-sm leading-relaxed text-zinc-400">
           <div className="text-white font-semibold">Single-sided by design</div>
           <p className="mt-2">
-            The vault holds one asset while waiting to convert across a configured
-            tick band. On the reference {deployment.pairSymbol} deployment,
-            depositors park {deployment.assetSymbol}; the vault&apos;s liquidity becomes
-            active as WETH drops into range. Honest trade-off: while price remains
-            outside the band, assets can sit idle until the owner rebalances.
+              You deposit {deployment.assetSymbol}. The vault works best when{' '}
+              {deployment.pairSymbol} trades inside its selected range. If price is
+              outside that range, some funds may wait in {deployment.assetSymbol}{' '}
+              instead of being forced into a bad trade.
+            </p>
+            <p className="mt-3">
+              A reserve keeper can help reduce idle time by offering unused reserves
+              to swaps at a controlled spread.
           </p>
           <p className="mt-3">
             <span className="text-white">Security</span> — anti-sandwich reference-price

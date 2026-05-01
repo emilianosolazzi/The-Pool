@@ -8,6 +8,7 @@ broadcast/
 
 # Local AI/agent working notes — not for the public repo
 .copilot/
+/You are a senior local-AI engineer, ML f.md
 
 
 fork-*.log
