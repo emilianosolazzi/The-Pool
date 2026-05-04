@@ -23,6 +23,16 @@ The current implementation is not the older four-contract V1 stack. V1 contracts
 
 Current production addresses are tracked in `docs/DEPLOYED_ADDRESSES.md`.
 
+| Component | Arbitrum One address |
+|---|---|
+| `FeeDistributor` | `0x5757DA9014EE91055b244322a207EE6F066378B0` |
+| `DynamicFeeHookV2` | `0x486579DE6391053Df88a073CeBd673dd545200cC` |
+| `SwapRouter02ZapAdapter` | `0xdF9Ba20e7995A539Db9fB6DBCcbA3b54D026e393` |
+| `LiquidityVaultV2` | `0xf79c2dc829cd3a2d8ceec353bdb1b2414ba1eee0` |
+| `VaultOwnerController` | `0xa0e1580CAe87027D023E9dE94899346BFA383724` |
+| `VaultLens` | `0x12e86890b75fdee22a35be66550373936d883551` |
+| `BootstrapRewards` | `0x3E6Ed05c1140612310DDE0d0DDaAcCA6e0d7a03d` |
+
 ```text
 Swapper
   |
