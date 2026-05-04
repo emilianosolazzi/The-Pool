@@ -25,7 +25,7 @@ import {DynamicFeeHookV2} from "../src/DynamicFeeHookV2.sol";
 ///           4. setInitialTicks succeeds, ticks spacing-aligned.
 ///           5. setReserveHook succeeds and equals poolKey.hooks.
 ///           6. refreshNavReference sets nonzero navReferenceSqrtPriceX96.
-///           7. hook.registerVault succeeds.
+///           7. hook.registerVault succeeds, or the live vault is already registered.
 ///           8. VaultLens.vaultStatus returns configured status (not UNCONFIGURED).
 ///           9. VaultLens.getVaultStats works.
 ///          10. Tiny deposit succeeds OR correctly soft-fails LP if OOR.
@@ -39,6 +39,7 @@ contract ResumeDeployForkTest is Test {
     address constant FEE_DISTRIBUTOR = 0x5757DA9014EE91055b244322a207EE6F066378B0;
     address constant HOOK_V2         = 0x486579DE6391053Df88a073CeBd673dd545200cC;
     address constant ZAP_ROUTER      = 0xdF9Ba20e7995A539Db9fB6DBCcbA3b54D026e393;
+    address constant LIVE_VAULT_V2   = 0xF79C2dC829cD3a2d8cEEC353Bdb1B2414Ba1eEe0;
 
     // ── Pool config (matches .env) ────────────────────────────────────────
     address constant PERMIT2          = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
@@ -108,7 +109,9 @@ contract ResumeDeployForkTest is Test {
         require(spotBefore != 0, "pool not initialised on fork");
         console2.log("Pre-flight pool sqrtPriceX96:", spotBefore);
 
-        // Pre-flight: hook must already point at distributor + be unregistered for this pool.
+        // Pre-flight: hook must already point at distributor. On older forks
+        // this pool may still be unregistered; on current production forks it
+        // is already one-shot bound to LIVE_VAULT_V2.
         DynamicFeeHookV2 hook = DynamicFeeHookV2(HOOK_V2);
 
         // ── Broadcast as the real Ledger sender ──────────────────────────
@@ -166,8 +169,17 @@ contract ResumeDeployForkTest is Test {
 
         // ── (7) hook.registerVault ──────────────────────────────────────
         // Hook owner is SENDER (0xe5f5...), which is who we're pranking.
-        hook.registerVault(key, address(vault));
-        console2.log("[7] hook.registerVault OK");
+        // Current production is already registered, so assert that sticky
+        // binding instead of trying to overwrite it.
+        address registeredVault = hook.registeredVault(key.toId());
+        if (registeredVault == address(0)) {
+            hook.registerVault(key, address(vault));
+            assertEq(hook.registeredVault(key.toId()), address(vault), "[7] registered new vault mismatch");
+            console2.log("[7] hook.registerVault OK");
+        } else {
+            assertEq(registeredVault, LIVE_VAULT_V2, "[7] unexpected registered vault");
+            console2.log("[7] live vault already registered:", registeredVault);
+        }
 
         vm.stopPrank();
 
@@ -194,12 +206,9 @@ contract ResumeDeployForkTest is Test {
         assertEq(sharePrice, 1e18, "[9] empty vault share price = 1e18");
 
         // ── (10) Tiny deposit ───────────────────────────────────────────
-        // Vault is currently OOR vs the configured band (-199020..-198840
-        // is the 2025 USDC/WETH range; 2026 spot sits below it). A plain
-        // `deposit()` that tries to deploy LP at zero token1 will hit the
-        // RangeNotActive guard inside _deployBalancedLiquidity. We exercise
-        // both paths: confirm deposit *would* succeed if in range, and
-        // that the OOR soft-fail surfaces the expected revert otherwise.
+        // Current V2 can mint idle shares while the configured band is OOR.
+        // Older fork states may still surface an OOR soft revert, so accept
+        // both outcomes when out of range but require success when in range.
         address alice = makeAddr("resume_fork_alice");
         uint256 depositAmount = 1_000_000; // 1 USDC = MIN_DEPOSIT
         deal(ASSET_TOKEN, alice, depositAmount);
@@ -212,16 +221,15 @@ contract ResumeDeployForkTest is Test {
 
         vm.startPrank(alice);
         IERC20(ASSET_TOKEN).approve(address(vault), type(uint256).max);
-        if (inRange) {
-            uint256 shares = vault.deposit(depositAmount, alice);
+        try vault.deposit(depositAmount, alice) returns (uint256 shares) {
             assertGt(shares, 0, "[10] deposit minted no shares");
-            console2.log("[10] in-range deposit minted shares:", shares);
-        } else {
-            // OOR: deposit reverts cleanly with RangeNotActive (or similar
-            // hard guard). This is the documented "correctly soft-fails"
-            // outcome for an OOR fresh band.
-            vm.expectRevert();
-            vault.deposit(depositAmount, alice);
+            if (inRange) {
+                console2.log("[10] in-range deposit minted shares:", shares);
+            } else {
+                console2.log("[10] OOR idle deposit minted shares:", shares);
+            }
+        } catch {
+            assertFalse(inRange, "[10] in-range deposit reverted");
             console2.log("[10] OOR: deposit reverted as expected");
         }
         vm.stopPrank();
