@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { useReadContract, useReadContracts } from 'wagmi';
-import { vaultAbi, lensAbi, poolManagerAbi } from '@/lib/abis';
+import { vaultAbi, lensAbi, poolManagerAbi, hookAbi, distributorAbi } from '@/lib/abis';
 import { fmtCompact } from '@/lib/format';
 import { type Deployment } from '@/lib/deployments';
 import { encodeAbiParameters, keccak256, type Address, type Hex } from 'viem';
@@ -42,6 +42,7 @@ export function ValueCalculator({ deployment, chainId }: Props) {
   const vault = deployment.vault as Address | undefined;
   const lens = deployment.lens as Address | undefined;
   const poolManager = deployment.poolManager as Address | undefined;
+  const hook = deployment.hook as Address | undefined;
 
   // Get vault stats (V2.1: getVaultStats lives on the lens)
   const {
@@ -96,6 +97,40 @@ export function ValueCalculator({ deployment, chainId }: Props) {
   });
 
   const performanceFeeBps = Number(performanceFeeBpsData ?? 0n);
+
+  // Live fee split. The treasury share is owner-adjustable up to 50/100; read
+  // it from FeeDistributor so the projection survives any setTreasuryShare
+  // without a frontend redeploy. Falls back to the default 20/100 if reads
+  // are still in-flight.
+  const { data: distributorAddr } = useReadContract({
+    address: hook,
+    abi: hookAbi,
+    functionName: 'feeDistributor',
+    chainId,
+    query: { enabled: Boolean(hook), staleTime: 60_000 },
+  });
+  const { data: treasuryShareRaw } = useReadContract({
+    address: distributorAddr as Address | undefined,
+    abi: distributorAbi,
+    functionName: 'treasuryShare',
+    chainId,
+    query: { enabled: Boolean(distributorAddr), staleTime: 60_000 },
+  });
+  const { data: shareDenomRaw } = useReadContract({
+    address: distributorAddr as Address | undefined,
+    abi: distributorAbi,
+    functionName: 'SHARE_DENOMINATOR',
+    chainId,
+    query: { enabled: Boolean(distributorAddr), staleTime: 60_000 },
+  });
+  const treasuryShareRate = useMemo(() => {
+    const num = treasuryShareRaw as bigint | undefined;
+    const den = shareDenomRaw as bigint | undefined;
+    if (num !== undefined && den && den > 0n) {
+      return Number(num) / Number(den);
+    }
+    return 0.2;
+  }, [treasuryShareRaw, shareDenomRaw]);
 
   // Get pool key from vault (we need this for pool queries)
   const {
@@ -228,8 +263,7 @@ export function ValueCalculator({ deployment, chainId }: Props) {
     const poolFeeRate = poolKey ? Number(poolKey.fee) / 1_000_000 : 0.0005;
 
     const hookFeesDaily = volume * hookFeeRate;
-    const treasuryShare = 0.2;
-    const lpDonationDaily = hookFeesDaily * (1 - treasuryShare);
+    const lpDonationDaily = hookFeesDaily * (1 - treasuryShareRate);
     const poolFeesDaily = volume * poolFeeRate;
 
     // Vault captures only its in-range liquidity share phi.
@@ -305,6 +339,7 @@ export function ValueCalculator({ deployment, chainId }: Props) {
     vaultLiquiditySharePct,
     depositAmount,
     timeframe,
+    treasuryShareRate,
   ]);
 
   const isBlockingLoad = !vaultStats && (isVaultStatsLoading || isPoolKeyLoading);
@@ -395,11 +430,11 @@ export function ValueCalculator({ deployment, chainId }: Props) {
             <div className="space-y-2 text-sm">
               <div className="flex justify-between">
                 <span className="text-zinc-400">Hook Fee to LP Donation:</span>
-                <span className="text-white">80.0%</span>
+                <span className="text-white">{((1 - treasuryShareRate) * 100).toFixed(1)}%</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-zinc-400">Hook Fee to Treasury:</span>
-                <span className="text-white">20.0%</span>
+                <span className="text-white">{(treasuryShareRate * 100).toFixed(1)}%</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-zinc-400">Vault share of active LP liquidity:</span>
@@ -535,6 +570,39 @@ export function ValueCalculator({ deployment, chainId }: Props) {
               When the vault is actually in range, what share of the total fee-earning liquidity in
               that price band do you expect it to represent?
             </p>
+          </div>
+        </div>
+
+        {/* Scenario presets. Set both the volatile-hit rate and the vault
+            liquidity share at once. Defaults match "Moderate". */}
+        <div className="mt-4">
+          <div className="mb-2 text-xs uppercase tracking-wide text-zinc-500">Scenario presets</div>
+          <div className="flex flex-wrap gap-2">
+            {([
+              { key: 'conservative', label: 'Conservative', vol: '10', share: '0.5', hint: '10% volatile / 0.5% LP share' },
+              { key: 'moderate', label: 'Moderate (default)', vol: '20', share: '1', hint: '20% volatile / 1% LP share' },
+              { key: 'upside', label: 'Upside', vol: '30', share: '3', hint: '30% volatile / 3% LP share' },
+            ] as const).map((p) => {
+              const isActive = volatilityHitRatePct === p.vol && vaultLiquiditySharePct === p.share;
+              return (
+                <button
+                  key={p.key}
+                  type="button"
+                  onClick={() => {
+                    setVolatilityHitRatePct(p.vol);
+                    setVaultLiquiditySharePct(p.share);
+                  }}
+                  title={p.hint}
+                  className={`rounded border px-3 py-1.5 text-xs font-medium transition ${
+                    isActive
+                      ? 'border-blue-500 bg-blue-500/15 text-white'
+                      : 'border-zinc-600 bg-zinc-700/40 text-zinc-300 hover:border-zinc-500 hover:text-white'
+                  }`}
+                >
+                  {p.label}
+                </button>
+              );
+            })}
           </div>
         </div>
 

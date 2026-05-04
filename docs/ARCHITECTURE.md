@@ -1,386 +1,476 @@
-# Architecture — DeFi Hook Protocol
+# Architecture - The Pool V2.1
 
 ## Overview
 
-The DeFi Hook Protocol is a Uniswap v4 hook system that attaches a dynamic fee layer to a concentrated-liquidity pool and automatically routes collected fees back to LPs and a treasury. An ERC-4626 vault manages the LP position, so depositors hold fungible shares that appreciate as collected asset-token yield accumulates.
+The Pool V2.1 is a Uniswap v4 hook protocol for a WETH/USDC concentrated-liquidity pool on Arbitrum. It combines three mechanics:
 
-Hook donations are not vault-exclusive: the distributor's LP share (default 80%, never less than 50%) is donated to pool fee growth, so whichever LP positions are in range at the donation tick earn it pro rata by active liquidity. The vault is a convenience wrapper around one such LP position; it does not receive a privileged fee stream.
+1. A dynamic hook fee on AMM-routed swaps.
+2. A reserve-sale path where the vault can post one-sided inventory that exact-input swappers may fill before the AMM leg.
+3. An ERC-4626 vault that packages LP operations, reserve inventory, share accounting, optional zaps, and bootstrap rewards into depositor shares.
 
-The system is four Solidity contracts (`>=0.8.24 <0.9.0`) in a strict dependency chain:
+The current implementation is not the older four-contract V1 stack. V1 contracts and tests live under `src/archive-v1/` and `test/archive-v1/`. The current V2.1 stack is:
 
-```
-Swapper ──► Uniswap v4 PoolManager
-                   │ beforeSwap / afterSwap
-                   ▼
-           DynamicFeeHook           ← hook registered on PoolKey
-                   │ transfer + distribute()
-                   ▼
-           FeeDistributor
-            ├─ treasuryShare ──► Treasury address (direct transfer; default 20%, owner-adjustable, capped at 50%)
-            └─ remainder    ──► poolManager.donate()  (default 80%; LP fee growth)
-                              │ collectYield / withdraw / rebalance
-                              ▼
-                       LiquidityVault  (ERC-4626)
-                              │ modifyLiquidities() via Permit2
-                              ▼
-                    v4-periphery PositionManager
-```
+| Component | Source | Role |
+|---|---|---|
+| `BaseHook` | `src/BaseHook.sol` | Minimal Uniswap v4 hook base and PoolManager caller guard. |
+| `DynamicFeeHookV2` | `src/DynamicFeeHookV2.sol` | Hook callbacks, dynamic fee routing, reserve-sale fills, reserve accounting, diagnostics. |
+| `FeeDistributor` | `src/FeeDistributor.sol` | Splits hook fees between treasury/bootstrap and LP-side `poolManager.donate()`. |
+| `LiquidityVaultV2` | `src/LiquidityVaultV2.sol` | ERC-4626 vault, LP position management, zaps, reserve offers, NAV protection, bootstrap auto-pokes. |
+| `VaultOwnerController` | `src/VaultOwnerController.sol` | Safe-owned controller that exposes narrow reserve-keeper permissions. |
+| `VaultLens` | `src/VaultLens.sol` | Read-only vault status and stats helper for frontends/keepers. |
+| `SwapRouter02ZapAdapter` | `src/SwapRouter02ZapAdapter.sol` | Narrow Uniswap SwapRouter02 adapter used by vault zap entrypoints. |
+| `BootstrapRewards` | `src/BootstrapRewards.sol` | Optional early-depositor bonus program funded from treasury inflows. |
 
----
+Current production addresses are tracked in `docs/DEPLOYED_ADDRESSES.md`.
 
-## Contracts
-
-### `BaseHook` (`src/BaseHook.sol`)
-
-Minimal abstract base implementing `IHooks`. Provides:
-
-- `onlyPoolManager` modifier — all hook callbacks revert with `NotPoolManager()` if not called by the registered `PoolManager`.
-- `Hooks.validateHookPermissions` called in the constructor — ensures the hook's deployment address encodes the correct permission bits (Uniswap v4 requirement).
-- Default `revert HookNotImplemented()` for every callback; subclasses override only what they need.
-
-### `DynamicFeeHook` (`src/DynamicFeeHook.sol`)
-
-Extends `BaseHook` and `Ownable2Step`. Activates `beforeSwap`, `afterSwap`, and `afterSwapReturnDelta` callbacks.
-
-**Fee computation (beforeSwap)**
-
-1. Base fee: `amountIn × 25 BPS` (constant `HOOK_FEE_BPS = 25`).
-2. Volatility multiplier: reads current `sqrtPriceX96` via `StateLibrary.getSlot0()`. If it moved ≥ 1 % from `lastSqrtPriceX96`, the fee is scaled by **1.5×** (`VOLATILITY_FEE_MULTIPLIER = 150`).
-3. Cap: fee is clamped to `amountIn × maxFeeBps / 10_000` (owner-adjustable, default 50 BPS = 0.5%, hard max 1000 BPS via `setMaxFeeBps`).
-4. Fee currency: `currency1` for `zeroForOne` swaps, `currency0` for `!zeroForOne` (fee taken from the output token side).
-5. Fee amount and currency address are written to **EIP-1153 transient storage** (`TSTORE`) at fixed slots — no persistent state change crosses the callback boundary.
-6. `totalSwaps` is incremented.
-
-**Fee collection (afterSwap)**
-
-1. Reads fee and currency from transient storage (`TLOAD`), then zeroes both slots.
-2. If fee is 0, returns early.
-3. Pulls the fee from the pool via `poolManager.take(feeCurrency, address(this), fee)`.
-4. Transfers fee tokens directly to the `feeDistributor` address via `feeCurrency.transfer()`.
-5. Calls `feeDistributor.distribute(feeCurrency, fee)`.
-6. Accumulates `totalFeesRouted`.
-7. Emits `FeeRouted(currency, amount, swapIndex)`.
-8. Updates `lastSqrtPriceX96` only when `block.number > lastSwapBlock` (anti-sandwich).
-9. Returns `int128(uint128(fee))` as the `afterSwapReturnDelta` — tells PoolManager this amount was taken.
-
-**Key state**
-
-| Variable | Type | Default | Notes |
-|---|---|---|---|
-| `LP_FEE` | `uint24` | 100 | Pool's base LP fee (0.01%) |
-| `HOOK_FEE_BPS` | `uint256` | 25 | Hook's base fee rate (0.25%) |
-| `maxFeeBps` | `uint256` | 50 | Owner-adjustable cap in BPS (max 1000 = 10%) |
-| `lastSqrtPriceX96` | `uint160` | 0 | Inter-swap price tracker; 0 = first swap skips volatility check |
-| `lastSwapBlock` | `uint256` | 0 | Block of last price-reference update |
-| `feeDistributor` | `IFeeDistributor` | set at deploy | Replaceable via `setFeeDistributor()` |
-| `totalSwaps` | `uint256` | 0 | Monotonically increasing counter |
-| `totalFeesRouted` | `uint256` | 0 | Cumulative fee tokens sent to distributor |
-
-**View helpers**
-
-- `getSwapFeeInfo(amountIn)` — returns fee breakdown: amount, BPS, treasury/LP split in BPS, description string. The treasury/LP split is read live from `FeeDistributor.treasuryShare()`, so the view stays correct after `setTreasuryShare`.
-- `getVolatilityInfo()` — returns threshold BPS, multiplier %, reference price, reference block.
-- `getStats()` — returns `(totalSwaps, totalFeesRouted, distributorAddress)`.
-
-**Anti-sandwich protection**
-
-`lastSqrtPriceX96` is updated in `afterSwap` only when `block.number > lastSwapBlock`. An attacker cannot reset the reference price with a cheap same-block swap to suppress the 1.5× volatility multiplier on a subsequent exploit swap. The reference price always lags at least one block behind the current price.
-
-### `FeeDistributor` (`src/FeeDistributor.sol`)
-
-Extends `Ownable2Step` and `ReentrancyGuard`. Single entry point: `distribute(currency, amount)`.
-
-**Split logic**
-
-```
-Treasury  =  amount × treasuryShare / 100      (default treasuryShare = 20)
-LPs       =  amount − Treasury                 (default LP share = 80)
-```
-
-`treasuryShare` is owner-adjustable via `setTreasuryShare`, hard-capped at `MAX_TREASURY_SHARE = 50` (LP share floor 50%). Lowering `treasuryShare` only ever increases the LP share.
-
-The LP portion is donated back to the pool via Uniswap v4's sync-settle-donate pattern:
-
-```solidity
-poolManager.sync(currency);
-currency.transfer(address(poolManager), lpAmount);
-poolManager.settle();
-poolManager.donate(poolKey, amount0, amount1, "");
-```
-
-This feeds `feeGrowthGlobal` in the v4 PoolManager, which accrues to all in-range LP positions proportionally.
-
-More precisely, the donation accrues to whichever LP positions are in range at `slot0.tick`, pro rata by active liquidity. The vault only earns its share when its position is active; self-managed LPs with comparable in-range liquidity receive the same donated hook bonuses directly.
-
-**Access control**
-
-- `distribute()` requires `msg.sender == hook` — only the registered hook can trigger fee routing.
-- `setHook()` / `setTreasury()` / `setPoolKey()` are owner-only with `Ownable2Step` two-step transfer.
-- `setPoolKey()` can only be called once (`_poolKeySet` guard).
-
-**Stats**
-
-| Variable | Notes |
+| Component | Arbitrum One address |
 |---|---|
-| `totalDistributed` | Cumulative total (treasury + LP) |
-| `totalToTreasury` | Cumulative treasury share |
-| `totalToLPs` | Cumulative LP share |
-| `distributionCount` | Number of `distribute()` calls |
+| `FeeDistributor` | `0x5757DA9014EE91055b244322a207EE6F066378B0` |
+| `DynamicFeeHookV2` | `0x486579DE6391053Df88a073CeBd673dd545200cC` |
+| `SwapRouter02ZapAdapter` | `0xdF9Ba20e7995A539Db9fB6DBCcbA3b54D026e393` |
+| `LiquidityVaultV2` | `0xf79c2dc829cd3a2d8ceec353bdb1b2414ba1eee0` |
+| `VaultOwnerController` | `0xa0e1580CAe87027D023E9dE94899346BFA383724` |
+| `VaultLens` | `0x12e86890b75fdee22a35be66550373936d883551` |
+| `BootstrapRewards` | `0x3E6Ed05c1140612310DDE0d0DDaAcCA6e0d7a03d` |
 
-`getLPYieldSummary()` returns `(lpBonusRate = SHARE_DENOMINATOR − treasuryShare, totalToLPs, totalToTreasury, distributionCount)` — `lpBonusRate` reflects the live split.
+```text
+Swapper
+  |
+  v
+Uniswap v4 PoolManager
+  | beforeSwap / afterSwap
+  v
+DynamicFeeHookV2
+  |-- beforeSwap: optional exact-input reserve fill via BeforeSwapDelta
+  |-- afterSwap: dynamic hook fee on AMM-routed output side
+  |
+  +--> FeeDistributor
+  |      |-- treasury/bootstrap share
+  |      `-- LP share -> PoolManager.donate(poolKey, amount0, amount1, "")
+  |
+  `--> reserve escrow / proceeds owed for registered vault
 
-### `LiquidityVault` (`src/LiquidityVault.sol`)
+LiquidityVaultV2
+  |-- ERC-4626 USDC shares
+  |-- balanced v4 liquidity via PositionManager + Permit2
+  |-- optional zaps through SwapRouter02ZapAdapter
+  |-- reserve offer lifecycle through DynamicFeeHookV2
+  `-- BootstrapRewards poke on share movements
 
-Extends `ERC4626`, `Ownable2Step`, `ReentrancyGuard`, and `Pausable`. Manages the single concentrated-liquidity position and handles token approvals through **Permit2** (required by Uniswap v4 PositionManager).
+VaultOwnerController
+  |-- Safe/multisig owner for all admin paths
+  `-- hot keeper allowlist for typed reserve operations only
 
-The vault's value proposition is operational convenience: single-sided deposits, ERC-4626 shares, permissionless harvest triggers, and owner-managed range rebalancing. It does not have exclusive access to hook donations; sophisticated users managing their own in-range concentrated position can earn the same pool-level hook donations directly. The default deploy script configures a 4% performance fee on collected asset-token yield, which is a convenience fee rather than access to a privileged rebate stream.
-
-**Permit2 integration**
-
-The v4 PositionManager pulls tokens via the canonical Permit2 contract (`0x000000000022D473030F116dDEE9F6B43aC78BA3`), not standard ERC20 allowances. The vault handles this:
-
-- Constructor: `IERC20(asset).approve(permit2, type(uint256).max)` — one-time ERC20 approval so Permit2 can pull.
-- `setPoolKey()`: `IERC20(otherCurrency).approve(permit2, type(uint256).max)` — approves the non-asset token.
-- `_approveForPositionManager(amount)`: before each `modifyLiquidities` call, sets Permit2 `IAllowanceTransfer.approve()` for both currencies with 60-second expiry. The non-asset currency gets a 0-amount allowance with valid expiry to prevent `AllowanceExpired(0)` from `SETTLE_PAIR`.
-- When `permit2 == address(0)` (test environments with mock PositionManager), falls back to direct ERC20 approve.
-
-**ERC-4626 accounting**
-
-```solidity
-if (totalLiquidityDeployed == 0 || assetsDeployed == 0 || !_poolKeySet) {
-  totalAssets() = idleAssetBalance;
-} else {
-  totalAssets() = idleAssetBalance + liveAssetSideValueOfLiquidityAtCurrentPrice;
-}
+VaultLens + keeper exporter + Prometheus/Grafana
+  `-- public/operator telemetry for TVL, share price, range state, reserve health, and freshness
 ```
 
-`assetsDeployed` is still updated from actual balance deltas on deploy and removal, but it is no longer the sole source of NAV once liquidity is live. `totalAssets()` recomputes the position's current asset-side value with `LiquidityAmounts.getAmountsForLiquidity(...)` at the latest `sqrtPriceX96`, which prevents stale accounting when price moves into range and part of the single-sided position converts into the other token. Only asset-token yield is reflected in `totalAssets()` and ERC-4626 share price under the current implementation.
+## Contract Details
 
-**ERC-4626 overrides**
+### `BaseHook`
 
-- `maxDeposit()` — returns 0 when paused or pool key not set; respects `maxTVL`.
-- `maxMint()` — converts `maxDeposit` to shares.
-- `maxWithdraw()` / `maxRedeem()` — return 0 when paused.
+`BaseHook` implements Uniswap v4's `IHooks` surface and enforces `onlyPoolManager` on callbacks. It also validates hook permissions in the constructor with `Hooks.validateHookPermissions`. Subclasses override only the callbacks they use; every unimplemented callback reverts with `HookNotImplemented()`.
 
-**Deposit flow**
+### `DynamicFeeHookV2`
 
-```
-deposit(assets, receiver)          [nonReentrant, whenNotPaused]
-  ├── require(assets >= MIN_DEPOSIT)     // MIN_DEPOSIT = 1e6
-  ├── require(_poolKeySet)
-  ├── TVL cap check (if maxTVL > 0)
-  ├── totalDepositors++ (if first deposit for receiver)
-  ├── super.deposit()              // mint shares at current share price
-  └── _deployLiquidity(assets)     // open/increase a v4 position, or leave assets idle if current price would require both tokens
-```
+`DynamicFeeHookV2` extends `BaseHook`, `Ownable2Step`, and `ReentrancyGuard`. It enables these permission bits:
 
-**Withdraw flow**
+- `beforeSwap`
+- `afterSwap`
+- `beforeSwapReturnDelta`
+- `afterSwapReturnDelta`
 
-```
-withdraw(assets, receiver, owner)  [nonReentrant, whenNotPaused]
-  ├── _collectYield()              // harvest any accrued fees from the position
-  ├── proportion = assets / totalAssets
-  ├── _removeLiquidity(proportion) // DECREASE_LIQUIDITY + TAKE_PAIR + SWEEP
-  ├── super.withdraw()             // burn shares, transfer asset token
-  └── totalDepositors-- (if owner balance now 0)
+The CREATE2-mined hook address must encode those bits. The deploy script mines for low-byte flags `0xCC`.
+
+#### Dynamic Fee Path
+
+The V2 hook keeps the V1 dynamic fee idea but computes the final fee in `afterSwap` from the AMM-routed unspecified/output-side delta:
+
+```text
+base hook fee = output-side AMM delta * 25 bps
+volatile hook fee = base hook fee * 1.5, when the per-pool price reference moved >= 1%
+fee cap = output-side AMM delta * maxFeeBps / 10_000
+charged fee = min(dynamic fee, fee cap)
 ```
 
-**Redeem flow**
-
-```
-redeem(shares, receiver, owner)    [nonReentrant, whenNotPaused]
-  ├── _collectYield()
-  ├── assets = convertToAssets(shares)
-  ├── proportion = assets / totalAssets
-  ├── _removeLiquidity(proportion) // proportional removal
-  ├── super.redeem()               // burn shares, transfer asset token
-  └── totalDepositors-- (if owner balance now 0)
-```
-
-**Yield collection**
-
-`_collectYield()` calls `modifyLiquidities(DECREASE_LIQUIDITY 0, TAKE_PAIR)` — a zero-liquidity decrease that triggers the position manager to flush accrued fee tokens to the vault. The vault:
-
-1. Measures `balanceAfter − balanceBefore` of the asset token.
-2. Checks the other currency's balance delta (guarded by `.code.length > 0` to skip sentinels) and records it in `currency1YieldCollected`, emitting `Currency1YieldCollected`.
-3. Leaves non-asset-token yield outside ERC-4626 NAV; it is tracked for accounting but not swapped into the vault asset or reflected in share price.
-4. Deducts `performanceFeeBps` from the asset-token yield and transfers the fee to `treasury` via `SafeERC20.safeTransfer()`, emitting `PerformanceFeePaid`.
-5. Credits the net asset-token yield to `totalYieldCollected`, emitting `YieldCollected`.
-6. Updates `lastYieldUpdate = block.timestamp`.
-
-Callable externally via `collectYield()` (nonReentrant, permissionless).
-
-Under the current implementation, non-asset-token fees are a tracked side balance rather than a redeployed vault return. They can later be removed by the owner through `rescueIdle(otherToken)`.
-
-**Liquidity deployment**
-
-`_deployLiquidity(amount)` only deploys when the current price is fully out of range on the asset side. If price is in range or on the opposite side, the position would require both tokens, so the vault returns early and keeps assets idle until the owner rebalances or price moves back to a single-sided region.
-
-When deployment is possible, liquidity is computed from the asset amount:
-
-- If `assetIsToken0`: `LiquidityAmounts.getLiquidityForAmount0(sqrtPrice, sqrtPriceUpper, amount)`
-- If `!assetIsToken0`: `LiquidityAmounts.getLiquidityForAmount1(sqrtPriceLower, sqrtPrice, amount)`
-
-First call uses `MINT_POSITION + SETTLE_PAIR`. Subsequent calls use `INCREASE_LIQUIDITY + SETTLE_PAIR`. Actual `assetsDeployed` is measured from balance delta, not the theoretical amount.
-
-**Liquidity removal**
-
-`_removeLiquidity(proportion)` uses `DECREASE_LIQUIDITY + TAKE_PAIR + SWEEP`. Slippage is protected via `LiquidityAmounts.getAmountsForLiquidity` with a 0.5% haircut (`× 995 / 1000`).
-
-**Key state**
+Important fee state:
 
 | Variable | Default | Notes |
+|---|---:|---|
+| `HOOK_FEE_BPS` | `25` | Base hook fee rate. |
+| `maxFeeBps` | `50` | Owner-adjustable per-swap cap; hard max `1000`. |
+| `VOLATILITY_THRESHOLD_BPS` | `100` | 1% price-reference movement threshold. |
+| `VOLATILITY_FEE_MULTIPLIER` | `150` | 1.5x multiplier when threshold is hit. |
+| `_lastSqrtPriceX96[poolId]` | `0` | Per-pool reference price. |
+| `_lastSwapBlock[poolId]` | `0` | Prevents same-block reference refresh abuse. |
+| `totalSwaps` | `0` | Incremented when hook logic is active. |
+| `totalFeesRouted` | `0` | Cumulative hook fees sent to the distributor. |
+
+`beforeSwap` calculates the volatility multiplier and stores it, the pool id, and an active flag in EIP-1153 transient storage. `afterSwap` reads and clears those slots, validates the pool id, calculates the fee from the actual swap delta, calls `poolManager.take()`, sends tokens to `FeeDistributor`, and returns the fee as `afterSwapReturnDelta`.
+
+The hook tracks fee distribution failures without reverting the swap. If `feeDistributor.distribute()` reverts, the fee has already been transferred to the distributor, so the hook increments `failedDistribution[currency]` and emits `FeeDistributionFailed`. Operators recover by fixing the distributor state, calling `FeeDistributor.retryDistribute()` or `FeeDistributor.sweepUndistributed()`, then clearing the hook tally with `acknowledgeFailedDistribution()`.
+
+#### Reserve-Sale Path
+
+V2 adds a per-pool reserve-sale system. A registered vault can escrow one-sided inventory at the hook and quote it to exact-input swappers before the AMM leg.
+
+Core reserve state:
+
+| State | Meaning |
+|---|---|
+| `registeredVault[poolId]` | The single vault allowed to manage reserve offers for that pool. One-shot registration. |
+| `offers[poolId]` | Active/inactive reserve offer, sell currency, remaining inventory, quote price, expiry, side, pricing mode. |
+| `escrowedReserve[vault][currency]` | Vault inventory held by the hook. Still economically vault-owned. |
+| `proceedsOwed[vault][currency]` | Claimable currency received from filled reserve sales. |
+| `totalReserveFills` | Number of reserve fills. |
+| `totalReserveSold` | Cumulative reserve inventory sold, in raw sell-currency units. |
+
+Only the hook owner can call `registerVault(poolKey, vault)`, and each pool can be registered once in the current V2 hook. Once a vault is registered for a pool, it cannot be replaced by the existing contract. Replacing it would require a new hook deployment, a new pool, or a future hook version with an explicit migration path. Once registered, only that vault can create, cancel, or claim offers for the pool.
+
+Offer creation supports two pricing modes:
+
+| Mode | Intent | Fill gate |
 |---|---|---|
-| `tickLower` | −201 360 | Owner-adjustable via `rebalance()` |
-| `tickUpper` | −193 200 | Owner-adjustable via `rebalance()` |
-| `treasury` | deployer | Receives performance fees; updatable via `setTreasury()` |
-| `performanceFeeBps` | 0 (contract minimum) / 400 = 4% (deploy default) | Fee on yield; deploy script reads `PERFORMANCE_FEE_BPS` (defaults to 400). Contract initialises to 0; max 2 000 (20%) via `setPerformanceFeeBps()` |
-| `maxTVL` | 0 | Deposit ceiling in asset units; 0 = unlimited; via `setMaxTVL()` |
-| `permit2` | immutable | Canonical Permit2 address or `address(0)` for tests |
-| `positionTokenId` | 0 | ERC-721 token ID of the active v4 position; 0 = no position |
-| `assetIsToken0` | false | Set once in `setPoolKey()`; true when `asset() == poolKey.currency0` |
-| `assetsDeployed` | 0 | Token-denominated value in the active position (for NAV) |
-| `totalLiquidityDeployed` | 0 | Raw Uniswap L units (for display/removal calc) |
-| `totalYieldCollected` | 0 | Cumulative net asset-token yield credited to depositors |
-| `currency1YieldCollected` | 0 | Cumulative non-asset-token yield; tracked separately, excluded from ERC-4626 NAV, and extractable via `rescueIdle` |
+| `PRICE_IMPROVEMENT` | Vault gives swappers a price at or better than the AMM marginal price. | Fill only when the AMM is at-or-worse than the vault quote. |
+| `VAULT_SPREAD` | Vault monetizes spread when AMM spot is at-or-better than the vault quote. | Fill only when the AMM is favorable enough for the vault quote to capture spread. |
 
-**Rebalance**
+Reserve fills are exact-input only. The hook skips the reserve path for exact-output swaps, inactive offers, expired offers, direction mismatches, zero price, failed price gates, zero amounts, or `int128` delta overflow. When a fill succeeds, the hook:
 
-```
-rebalance(newTickLower, newTickUpper) [onlyOwner, nonReentrant]
-  ├── require(_poolKeySet, newTickLower < newTickUpper)
-  ├── _collectYield()           // flush fees before closing
-  ├── _removeLiquidity(1e18)    // close 100% of current position
-  ├── positionTokenId = 0       // reset NFT tracking
-  ├── tickLower / tickUpper = new values
-  ├── _deployLiquidity(idle)    // reopen at new range (if idle >= MIN_DEPOSIT)
-  └── emit Rebalanced
-```
+1. Takes the swapper's input currency from PoolManager.
+2. Settles the vault's sell currency back through PoolManager.
+3. Decrements offer inventory and escrow.
+4. Credits proceeds to `proceedsOwed`.
+5. Emits `ReserveFilled`.
+6. Returns a `BeforeSwapDelta` so the AMM leg only handles the remainder.
 
-**Other owner functions**
+`getOfferHealth()` exposes the active flag, drift bps, escrow balances, proceeds balances, vault quote, and pool spot for keepers and dashboards. `getStats()` returns `(totalSwaps, totalFeesRouted, distributor, totalReserveFills, totalReserveSold)`.
 
-- `rescueIdle(token)` — transfers idle tokens to owner; reverts if `token == asset()`. This is how non-asset-token fee balances can be extracted under the current implementation.
-- `pause()` / `unpause()` — emergency circuit breaker.
-- `setTreasury()`, `setPerformanceFeeBps()`, `setMaxTVL()`.
+### `FeeDistributor`
 
-**Permissionless triggers**
+`FeeDistributor` is the only contract that should receive routed hook fees. `distribute(currency, amount)` requires `msg.sender == hook`.
 
-- `collectYield()` — anyone can flush accrued fees to share price.
-- `compound()` — anyone can harvest fees and redeploy idle balance into the active range. `whenNotPaused`, `nonReentrant`. Out-of-range / no-position conditions early-return silently so keepers never get reverted. Bootstrap inflow is intentionally not pulled here — callers can multicall `BootstrapRewards.pullInflow()` alongside `compound()` when desired.
+Default split:
 
-**View helpers**
-
-- `getVaultStats()` — returns TVL, share price (1e18 = 1:1), depositors, deployed assets, yield collected, fee description. The fee description is rebuilt live from the current `performanceFeeBps`; the swap-side split is sourced from `DynamicFeeHook.getSwapFeeInfo` to keep one source of truth.
-- `getProjectedAPY(recentYield, windowSeconds)` — returns annualized yield in BPS. Caller supplies the observed window; vault does not store a rolling average.
-
----
-
-## Data Flow — Full Swap Cycle
-
-```
-1. Swapper calls PoolManager.swap() (via unlock callback pattern)
-2. PoolManager calls DynamicFeeHook.beforeSwap()
-   → fee = amountIn × 25 BPS (×1.5 if volatile), capped at maxFeeBps
-   → fee amount + currency stored in transient storage (TSTORE)
-   → totalSwaps incremented
-3. Swap executes inside PoolManager (modifies pool state)
-4. PoolManager calls DynamicFeeHook.afterSwap()
-   → fee + currency read from transient storage (TLOAD), slots zeroed
-   → poolManager.take(feeCurrency, hook, fee) — pulls fee tokens from pool
-   → feeCurrency.transfer(distributor, fee) — sends to distributor
-   → feeDistributor.distribute(feeCurrency, fee) called
-   → returns afterSwapReturnDelta = fee (tells PM this was consumed)
-5. FeeDistributor.distribute() splits fee:
-   → treasuryAmount = fee × treasuryShare / 100  (default 20%, owner-adjustable, capped at 50%) → transferred to treasury
-   → lpAmount = fee − treasuryAmount
-   → poolManager.sync(currency) → transfer to PM → settle() → donate()
-  → LP fee growth accrues in pool state for whichever LP positions are in range at the donation tick
-6. LiquidityVault._collectYield() (on withdraw, redeem, or explicit call)
-   → DECREASE_LIQUIDITY(0) + TAKE_PAIR via PositionManager
-  → harvests the vault position's pro-rata share of accumulated LP fees to vault balance
-  → only the asset-token portion increases ERC-4626 NAV and share price
-  → non-asset-token fees are tracked separately and can be removed via `rescueIdle(otherToken)`
-   → performance fee deducted and sent to treasury
-   → net yield credited → share price appreciates for all depositors
+```text
+treasuryShare = 20 / 100
+LP share = 80 / 100
 ```
 
----
+The owner may adjust `treasuryShare`, capped at `MAX_TREASURY_SHARE = 50`. The LP share is always the complement.
 
-## Security Properties
+Distribution flow:
+
+1. Validate the pool key has been set and the currency is either `poolKey.currency0` or `poolKey.currency1`.
+2. Transfer the treasury/bootstrap share directly to `treasury`.
+3. Donate the LP share back into the v4 pool using `sync -> transfer -> settle -> donate`.
+4. Update `totalDistributed`, `totalToTreasury`, `totalToLPs`, and `distributionCount`.
+
+The donated LP share is pool-level fee growth. It accrues to whichever LP positions are active and in range at the donation tick, pro rata by active liquidity. The vault is one LP wrapper; it does not receive a privileged donation stream.
+
+Recovery functions:
+
+- `retryDistribute(currency, amount)` re-runs accounting for tokens physically present in the distributor.
+- `sweepUndistributed(currency, to, amount)` is a last-resort owner escape hatch for stuck pool currencies.
+
+### `LiquidityVaultV2`
+
+`LiquidityVaultV2` is an ERC-4626 vault whose asset is the configured deposit token, currently USDC on the V2.1 deployment. It can hold idle asset, idle other-token inventory, a v4 LP NFT position, reserve inventory escrowed at the hook, and reserve proceeds pending at the hook.
+
+The vault is ERC-20-only. Native ETH pools and native ETH transfers are rejected; accidental native dust can only be recovered through `rescueNative()`.
+
+#### ERC-4626 Share Accounting
+
+`totalAssets()` includes:
+
+- Idle asset balance.
+- Asset-side value of the live v4 liquidity position.
+- Other-token side of the live position quoted back to the vault asset.
+- Idle other-token balance quoted back to the vault asset.
+- Pending reserve proceeds owed by the hook.
+- Reserve inventory escrowed at the hook.
+
+Other-token idle/pending/escrow balances are quoted at a price clamped to the active tick range, while live LP amounts are valued at live spot. This keeps NAV continuous across reserve offer post, partial fill, full fill, claim, and cancel states.
+
+The vault has a NAV deviation guard. `totalAssets()` quotes the non-asset side at pool spot, but entrypoints that mint or burn shares call `_bootstrapAndCheckNav()`. The first use bootstraps `navReferenceSqrtPriceX96`; later calls revert with `NAV_PRICE_DEVIATION()` if live spot differs from the reference by more than `maxNavDeviationBps` of price. The owner can re-anchor the reference with `refreshNavReference()` after a legitimate move.
+
+#### Deposits, Zaps, And Liquidity
+
+Plain `deposit()` and `mint()`:
+
+1. Require pool configuration and `MIN_DEPOSIT = 1e6` asset units.
+2. Check/initialize the NAV reference.
+3. Pull reserve proceeds from the hook in both currencies.
+4. Enforce `maxTVL` if set.
+5. Mint ERC-4626 shares.
+6. Try to deploy balanced v4 liquidity with available token balances.
+
+`depositWithZap()` lets a depositor supply the vault asset, swap part of it into the other pool token through the configured zap router, deploy balanced liquidity, then mint shares from the net NAV delta produced by the operation. This prevents existing depositors from absorbing the new depositor's swap cost or slippage. User guards include `minOtherOut`, `minLiquidity`, `minSharesOut`, and `deadline`.
+
+`withdraw()` and `redeem()` collect LP fees, remove proportional liquidity, and require enough vault asset to satisfy the request. If the vault holds value in the other token, `withdrawWithZap()` and `redeemWithZap()` can swap other-token inventory back to asset through the zap router before final transfer.
+
+Liquidity operations use `VaultLP` and v4 `PositionManager` with Permit2 approvals. Deployment records actual spent amounts and minted liquidity; removal uses `removeLiquiditySlippageBps`, capped at 100 bps.
+
+#### Reserve Operations
+
+The vault owns the reserve lifecycle from the hook's perspective:
+
+- `setReserveHook(newHook)` binds the hook and requires it to match `poolKey.hooks`.
+- `offerReserveToHook()` and `offerReserveToHookWithMode()` escrow inventory at the hook.
+- `cancelReserveOffer()` returns unfilled inventory.
+- `collectReserveProceeds()` pulls one currency of proceeds back to the vault.
+- `rebalanceOffer()` and `rebalanceOfferWithMode()` atomically cancel an existing offer if active, claim both proceeds currencies, and post a fresh offer.
+
+Every deposit, mint, withdraw, and redeem also calls `_pullReserveProceedsBoth()` before share math so already-realized proceeds are included physically in the vault.
+
+#### Bootstrap Rewards Integration
+
+The vault can bind an optional `BootstrapRewards` contract. When set, every mint, burn, or transfer auto-pokes both affected share holders through `BootstrapRewards.poke(user)`. Pokes are wrapped in `try/catch`; a failing rewards contract emits `BootstrapPokeFailed` but cannot block deposits, withdrawals, or transfers.
+
+### `VaultOwnerController`
+
+`VaultOwnerController` is the owner-of-vault wrapper used for V2.1 operations. The Safe/multisig owns the controller. The controller owns the vault. Hot keepers can be allowlisted for typed reserve operations only:
+
+- `offerReserveToHookWithMode()`
+- `rebalanceOfferWithMode()`
+- `cancelReserveOffer()`
+- `collectReserveProceeds()`
+
+Everything else goes through the Safe-only `executeVaultOwnerCall(bytes)` escape hatch: `setPoolKey`, `rebalance`, `setReserveHook`, `setBootstrapRewards`, `setZapRouter`, pause/unpause, ownership transfer, NAV reference updates, and similar owner operations.
+
+The raw escape hatch rejects the reserve selectors above so reserve keeper activity always emits controller-level `ReserveKeeperCallExecuted` events.
+
+Production ownership hierarchy:
+
+```text
+Safe/multisig
+  -> owns VaultOwnerController
+      -> owns LiquidityVaultV2
+          -> remains registered vault in DynamicFeeHookV2
+
+Hot keeper
+  -> allowlisted in VaultOwnerController only for reserve operations
+```
+
+### `VaultLens`
+
+`VaultLens` is a read-only helper for frontends and keepers.
+
+`vaultStatus(vault)` returns:
+
+- `UNCONFIGURED`
+- `PAUSED`
+- `IN_RANGE`
+- `OUT_OF_RANGE`
+
+`getVaultStats(vault)` returns TVL, share price scaled to `1e18`, depositor count, deployed assets, collected asset-token yield, and a legacy `feeDesc` string that is currently empty.
+
+### `SwapRouter02ZapAdapter`
+
+The zap adapter exposes the narrow `IZapRouter.swapExactInput()` surface expected by the vault and forwards to Uniswap SwapRouter02 `exactInputSingle`. The vault never accepts arbitrary router calldata. The adapter enforces a nonzero amount, nonzero recipient, live deadline, and `amountOutMinimum`.
+
+### `BootstrapRewards`
+
+`BootstrapRewards` is an optional early-depositor reward program. It can be configured as the `FeeDistributor.treasury` during a program window. It splits incoming payout-asset inflows between an epoch bonus pool and the real treasury, tracks eligible share-seconds with lazy `poke(user)` accounting, applies dwell/cap rules, and pays rewards through `claim(epoch)` after finalization.
+
+Non-payout assets can be swept to the real treasury. Unclaimed epoch rewards can be swept after the claim window.
+
+## Data Flows
+
+### Swap With Optional Reserve Fill
+
+```text
+1. Swapper submits an exact-input swap through PoolManager.
+2. PoolManager calls DynamicFeeHookV2.beforeSwap().
+3. If a matching reserve offer is active, unexpired, direction-compatible, and price-gated:
+   - hook absorbs part/all of the swapper input;
+   - hook settles reserve output to the swapper;
+   - hook records proceeds owed to the vault;
+   - hook returns BeforeSwapDelta.
+4. PoolManager routes the remaining swap amount through the AMM.
+5. PoolManager calls DynamicFeeHookV2.afterSwap().
+6. Hook computes the dynamic fee from the AMM-routed output-side delta.
+7. Hook takes the fee, transfers it to FeeDistributor, and attempts distribution.
+8. FeeDistributor sends treasury/bootstrap share and donates LP share back to the pool.
+```
+
+Exact-output swaps skip reserve fills and still receive normal hook fee logic on the AMM-routed swap.
+
+### Vault Deposit
+
+```text
+deposit / mint / depositWithZap
+  -> check pool configured, not paused, min deposit, NAV reference
+  -> claim reserve proceeds in both currencies if pending
+  -> enforce TVL cap
+  -> optionally zap asset into other token
+  -> mint shares using ERC-4626 or net-NAV-delta zap math
+  -> deploy balanced v4 liquidity if possible
+  -> auto-poke BootstrapRewards on share mint
+```
+
+### Vault Withdrawal
+
+```text
+withdraw / redeem / withdrawWithZap / redeemWithZap
+  -> check NAV reference
+  -> claim reserve proceeds in both currencies if pending
+  -> collect LP fees
+  -> remove proportional liquidity
+  -> optionally zap other token back to asset
+  -> burn shares and transfer asset
+  -> auto-poke BootstrapRewards on share burn
+```
+
+### Reserve Offer Rotation
+
+```text
+keeper or Safe -> VaultOwnerController.rebalanceOfferWithMode()
+  -> controller forwards typed call to LiquidityVaultV2
+  -> vault checks active offer through hook.offerActive(poolKey)
+  -> if active: cancel old offer and return inventory
+  -> claim both proceeds currencies from hook
+  -> approve hook for new inventory
+  -> create fresh reserve offer with selected pricing mode
+  -> emit vault and controller events for auditability
+```
+
+## Security And Operational Properties
 
 | Property | Mechanism |
 |---|---|
-| Hook-only fee distribution | `require(msg.sender == hook)` in `FeeDistributor.distribute()` |
-| Two-step ownership | `Ownable2Step` on DynamicFeeHook, FeeDistributor, and LiquidityVault |
-| Reentrancy | `ReentrancyGuard` on `FeeDistributor.distribute()` and all vault entry points |
-| Emergency pause | `Pausable` on LiquidityVault; `pause()`/`unpause()` owner-only; blocks deposit, withdraw, redeem |
-| Callback caller verification | `onlyPoolManager` modifier in `BaseHook` (custom `NotPoolManager()` error) |
-| Slippage on liquidity removal | 0.5% minimum amount floor via `LiquidityAmounts.getAmountsForLiquidity` |
-| Transient fee storage | EIP-1153 `TSTORE/TLOAD` — fee data never persists across transactions |
-| Configurable fee cap | `maxFeeBps` (default 50 BPS, hard max 1000 BPS) prevents excessive single-swap fees |
-| Minimum deposit | `MIN_DEPOSIT = 1e6` guards against dust-share inflation |
-| TVL cap | `maxTVL` (owner-set) — deposits revert with `TVL_CAP` when exceeded |
-| Single-sided deployment guard | `_deployLiquidity()` leaves assets idle when the current price would require both tokens, avoiding failed in-range deployments |
-| Rescue guard | `rescueIdle(token)` reverts if `token == asset()` — owner cannot drain the vault's own asset |
-| Anti-sandwich (volatility) | `lastSwapBlock` — reference price updates only once per block |
-| Other-token sentinel guard | `currency1YieldCollected` tracking skips zero-code addresses to prevent precompile calls |
-| Permit2 expiry | `_approveForPositionManager` sets 60-second expiry on Permit2 allowances |
-| One-shot pool key | `setPoolKey()` can only be called once on both FeeDistributor and LiquidityVault |
-| Performance fee cap | `performanceFeeBps` max 2000 (20%), enforced in `setPerformanceFeeBps()` |
-| Optional TimelockController | Deploy script supports `OWNER` env var to deploy a timelock with configurable delay |
+| Hook caller verification | `BaseHook.onlyPoolManager` on callbacks. |
+| Hook address safety | CREATE2 salt mining for required v4 permission bits. |
+| Reserve manager immutability | `DynamicFeeHookV2.registerVault()` is one-shot per `PoolId`. |
+| Reserve caller control | Only registered vault can create, cancel, or claim offers. |
+| Reserve fill constraints | Exact-input only; direction, expiry, price gate, zero-amount, and delta-bound checks. |
+| Price-gate telemetry | `ReserveOfferStale` emitted when matched direction fails by more than 50 bps drift. |
+| Fee cap | `maxFeeBps` default 50 bps, hard max 1000 bps. |
+| Fee distribution DoS protection | Distributor failures do not revert swaps; unresolved amounts are tracked in `failedDistribution`. |
+| LP donation scope | Donations accrue to all in-range LPs at the donation tick, not only the vault. |
+| NAV manipulation guard | `navReferenceSqrtPriceX96` plus `maxNavDeviationBps` blocks share math under large spot deviations. |
+| Reserve NAV continuity | `totalAssets()` counts pending proceeds and escrowed reserve inventory. |
+| Native ETH rejection | Hook/vault/zap stack is ERC-20-only; native pools and direct ETH sends are rejected. |
+| Vault pause | `Pausable` blocks deposits, withdrawals, and redemptions. |
+| Reentrancy | `ReentrancyGuard` on distributor, vault, hook reserve/admin paths, controller, rewards. |
+| Permit2 handling | Vault grants Permit2 approvals for PositionManager flows when configured. |
+| Zap safety | Vault uses a narrow `IZapRouter`; adapter only forwards `exactInputSingle`. |
+| Slippage/deadline controls | Liquidity removal slippage capped at 1%; tx deadline capped at 3600 seconds. |
+| Keeper privilege separation | Hot keepers get reserve operations only; Safe retains all other vault owner powers. |
+| Bootstrap safety | Rewards auto-pokes cannot DoS share movements due to `try/catch`. |
 
----
+## Core Deployment And Ownership Hardening
 
-## Dependencies
+Canonical V2.1 deployment uses `script/DeployHookV2AndVault.s.sol`.
 
-| Library | Source | Purpose |
-|---|---|---|
-| `v4-core` | Uniswap | `PoolManager`, `PoolKey`, `PoolId`, `TickMath`, `StateLibrary`, `BalanceDelta`, `BeforeSwapDelta`, `Currency`, `Hooks`, `SwapParams` |
-| `v4-periphery` | Uniswap | `IPositionManager`, `Actions` |
-| `v4-core/test/utils` | Uniswap (test lib) | `LiquidityAmounts` (includes `getAmountsForLiquidity`) |
-| `permit2` | Uniswap (via v4-periphery) | `IAllowanceTransfer` — required for PositionManager token approvals |
-| OpenZeppelin v5 | OZ | `ERC4626`, `ERC20`, `Ownable2Step`, `ReentrancyGuard`, `Pausable`, `SafeERC20`, `Math`, `TimelockController` |
+Required environment values include:
 
----
-
-## Deployment
-
-`script/Deploy.s.sol` is a Foundry broadcast script that:
-
-1. Reads required env vars: `POOL_MANAGER`, `POS_MANAGER`, `TOKEN0`, `TOKEN1`, `TREASURY`.
-2. Reads optional env vars: `PERFORMANCE_FEE_BPS` (default 400 = 4%), `MAX_TVL` (default 0), `MAX_FEE_BPS` (default 50), `POOL_FEE` (script default 100 = 0.01%; the live Arbitrum deployment uses 500 = 0.05% via `.env.example`), `TICK_SPACING` (script default 1; live deployment uses 10 to match `POOL_FEE=500`), `SQRT_PRICE_X96` (default 1:1), `OWNER` (default none), `TIMELOCK_DELAY` (default 2 days).
-3. Pre-computes the `FeeDistributor` address (deployer nonce 0) so the hook constructor arg is known before deployment.
-4. Mines a CREATE2 salt for `DynamicFeeHook` via `HookMiner.find()` using the Foundry CREATE2 factory (`0x4e59b44847b379578588920cA78FbF26c0B4956C`) so the hook address encodes the required permission bits (`BEFORE_SWAP | AFTER_SWAP | AFTER_SWAP_RETURNS_DELTA`).
-5. Deploys `FeeDistributor` → `LiquidityVault` (with canonical Permit2) → `DynamicFeeHook{salt}`.
-6. Wires the circular dependency: `distributor.setHook(hook)`.
-7. Initialises the pool: `poolManager.initialize(poolKey, sqrtPrice)`.
-8. Registers the `PoolKey` on both the distributor and vault.
-9. If `OWNER` is set: deploys a `TimelockController` (proposer = OWNER, open executor, admin = OWNER) and initiates `Ownable2Step.transferOwnership()` on all three contracts. The multisig must call `acceptOwnership()` via the timelock after the delay expires.
-
-Run with:
-```bash
-forge script script/Deploy.s.sol --tc Deploy --rpc-url $RPC_URL --private-key $PK --broadcast
+```text
+POOL_MANAGER
+POS_MANAGER
+TOKEN0
+TOKEN1
+ASSET_TOKEN
+POOL_FEE
+TICK_SPACING
+INIT_SQRT_PRICE_X96
+V2_TICK_LOWER
+V2_TICK_UPPER
+PERMIT2
+TREASURY
+SWAP_ROUTER_02 or ZAP_ROUTER
 ```
 
----
+Optional values include:
+
+```text
+ZAP_POOL_FEE
+PERFORMANCE_FEE_BPS   default 400
+MAX_TVL               default 0
+MAX_FEE_BPS           default 50
+```
+
+Deployment sequence:
+
+1. Load pool, token, range, Permit2, treasury, zap, and fee config.
+2. Precompute the `FeeDistributor` address from deployer nonce.
+3. Mine a CREATE2 salt for `DynamicFeeHookV2` with required permission bits.
+4. Deploy `FeeDistributor` with hook unset.
+5. Deploy `DynamicFeeHookV2` with the mined salt.
+6. Wire `distributor.setHook(hook)`.
+7. Initialize the v4 pool and set the distributor pool key.
+8. Deploy or reuse `SwapRouter02ZapAdapter`.
+9. Deploy `LiquidityVaultV2`, set pool key, initial range, reserve hook, treasury, performance fee, and TVL cap.
+10. Register the vault with `hook.registerVault(poolKey, vault)`.
+
+Post-deploy ownership hardening:
+
+1. Deploy `VaultOwnerController` with the Safe as controller owner.
+2. Current vault owner calls `vault.transferOwnership(controller)`.
+3. Call `controller.acceptVaultOwnership()`.
+4. Safe calls `controller.setReserveKeeper(keeperEOA, true)`.
+5. Keeper writes through `KEEPER_WRITE_TARGET=controller` while reads remain pointed at the vault, hook, and lens.
+
+Run through the wrapper script where possible:
+
+```powershell
+.\script\deploy-ledger.ps1
+```
+
+Direct Foundry entrypoint:
+
+```bash
+forge script script/DeployHookV2AndVault.s.sol --tc DeployHookV2AndVault --rpc-url $RPC_URL --private-key $PK --broadcast
+```
+
+Related deployment scripts:
+
+| Script | Purpose |
+|---|---|
+| `script/DeployController.s.sol` | Deploy or wire `VaultOwnerController`. |
+| `script/DeployBootstrap.s.sol` | Deploy `BootstrapRewards`. |
+| `script/DeployVaultResume.s.sol` | Resume/wire a deployed V2 vault. |
+| `script/VerifyResumeDeploy.s.sol` | Verify resumed deployment state. |
+| `script/SeedActiveLiquidity.s.sol` | Seed vault liquidity for fork/live checks. |
+| `script/ForkE2E.s.sol` | Fork end-to-end exercise. |
+
+Archived V1 deployment scripts live under `script/archive-v1/` and should not be used for the current V2.1 stack.
+
+## Keeper And Telemetry
+
+The keeper in `scripts/keeper/reserveKeeper.ts` reads VaultLens, hook health, offer details, reserve proceeds, escrow, and hook counters. In write mode it can call the controller reserve paths; in `READ_ONLY=true` mode it exports live Prometheus metrics without requiring a private key.
+
+In controller mode, the keeper must not require `keeperEOA == vault.owner()`. The correct checks are `vault.owner() == KEEPER_WRITE_TARGET` and `controller.reserveKeepers(keeperEOA) == true`.
+
+The public Grafana bundle lives under `scripts/keeper/grafana-public/` and is intentionally separate from the private operator dashboard. Public panels should focus on trust and investor-visible state: TVL, share price, depositors, data freshness, offer state, quote drift, reserve fills, reserve inventory, and settlement backlog.
 
 ## Test Architecture
 
 | Suite | File | Coverage |
 |---|---|---|
-| Unit — Hook | `test/DynamicFeeHook.t.sol` | Fee calc, volatility multiplier, cap, transient storage, routing |
-| Unit — Distributor | `test/FeeDistributor.t.sol` | Default 20/80 split, `setTreasuryShare` cap (max 50), access control, stats accumulation |
-| Unit — Vault | `test/LiquidityVault.t.sol` | ERC-4626 mechanics, share price, yield, rebalance, APY math, Ownable2Step |
-| Integration | `test/Integration.t.sol` | Real v4-core `PoolManager`, multi-swap fee accumulation, donate flow |
-| Invariants | `test/invariants/VaultInvariant.t.sol` | Vault accounting invariants |
+| Hook reserve unit | `test/DynamicFeeHookV2.t.sol` | Vault registration, reserve offer creation/cancel/claim, validation. |
+| Fee distributor | `test/FeeDistributor.t.sol` | Split math, caps, hook-only access, retry/sweep recovery. |
+| Vault V2 unit | `test/LiquidityVaultV2.t.sol` | ERC-4626 mechanics, zaps, NAV continuity, reserve hook binding, bootstrap auto-poke. |
+| Controller unit | `test/VaultOwnerController.t.sol` | Keeper allowlist, typed reserve forwards, Safe escape hatch restrictions. |
+| Bootstrap rewards | `test/BootstrapRewards.t.sol` | Epochs, dwell, caps, claims, sweeps, treasury forwarding. |
+| V2 reserve integration | `test/IntegrationV2Reserve.t.sol` | Reserve fills coexisting with AMM swaps and fee routing. |
+| Pricing modes | `test/ReservePricingMode.t.sol` | `PRICE_IMPROVEMENT` and `VAULT_SPREAD` gates in both swap directions. |
+| Reserve invariants | `test/ReserveFillInvariants.t.sol` | Reserve accounting and exact-output skip behavior. |
+| Reserve fuzz invariants | `test/ReserveFillFuzzInvariants.t.sol` | Stateful reserve offer/fill/cancel/claim invariants. |
+| Reality checks | `test/RealityCheck.t.sol` | Human-readable reserve lifecycle, stale offers, fee distribution, health views. |
+| Fork checks | `test/ResumeDeployFork.t.sol`, `test/LiquidityVaultV2Fork.t.sol` | Live/fork deployment state, VaultLens, zap adapter behavior. |
 
-Mocks (in `test/mocks/`):
+V1 tests remain under `test/archive-v1/` for history and regression reference only.
 
-- `MockPoolManager` — stubs `take`, `donate`, `sync`, `settle`, `initialize`, `extsload` (returns `sqrtPriceX96 = 1`).
-- `MockPositionManager` — stubs `nextTokenId` and `modifyLiquidities`; supports `queueYield()` to simulate fee collection without a live pool.
-- `MockFeeDistributor` — stub for isolated hook testing.
-- `MockERC20` — mintable ERC-20 for test asset.
+## Support Libraries And Interfaces
 
-Test utilities (in `test/utils/`):
+| File | Purpose |
+|---|---|
+| `src/libraries/VaultMath.sol` | NAV quote math, clamped quote pricing, price deviation checks. |
+| `src/libraries/VaultLP.sol` | PositionManager action encoding for deploy, collect, and remove liquidity. |
+| `src/libraries/LiquidityAmounts.sol` | Liquidity/amount conversions for v4 ranges. |
+| `src/libraries/CurrencySettler.sol` | Currency settlement helper used by the hook. |
+| `src/interfaces/IZapRouter.sol` | Minimal zap router interface consumed by `LiquidityVaultV2`. |
 
-- `HookMiner` — brute-force CREATE2 salt search to find hook addresses with required permission bits.
+## V1 Archive Note
+
+The old V1 `DynamicFeeHook` and `LiquidityVault` docs are no longer the canonical architecture. V1 did not include the V2 reserve-sale path, zap-aware fair deposits/withdrawals, NAV deviation guard, controller-owned keeper model, VaultLens telemetry, or BootstrapRewards integration. New integrations should target V2.1 addresses and source files only.

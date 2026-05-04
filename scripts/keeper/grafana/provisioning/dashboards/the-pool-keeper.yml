@@ -1,0 +1,13 @@
+apiVersion: 1
+
+providers:
+  - name: the-pool-keeper
+    orgId: 1
+    folder: The Pool
+    folderUid: the-pool
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards/the-pool

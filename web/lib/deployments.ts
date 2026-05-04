@@ -14,6 +14,7 @@ const envAddr = (key: string): Address | undefined => {
 
 export interface Deployment {
   vault?: Address;
+  controller?: Address;
   lens?: Address;
   hook?: Address;
   distributor?: Address;
@@ -31,6 +32,8 @@ export const DEPLOYMENTS: Record<AppChainId, Deployment> = {
     // V2.1 production set (Phase C, Apr 2026). See repo memory for history.
     vault: envAddr('NEXT_PUBLIC_VAULT_ARB_ONE') ??
       ('0xf79c2dc829cd3a2d8ceec353bdb1b2414ba1eee0' as Address),
+    controller: envAddr('NEXT_PUBLIC_VAULT_CONTROLLER_ARB_ONE') ??
+      ('0xa0e1580CAe87027D023E9dE94899346BFA383724' as Address),
     lens: envAddr('NEXT_PUBLIC_VAULT_LENS_ARB_ONE') ??
       ('0x12e86890b75fdee22a35be66550373936d883551' as Address),
     hook: envAddr('NEXT_PUBLIC_HOOK_ARB_ONE') ??
@@ -52,6 +55,7 @@ export const DEPLOYMENTS: Record<AppChainId, Deployment> = {
   },
   [arbitrumSepolia.id]: {
     vault: envAddr('NEXT_PUBLIC_VAULT_ARB_SEPOLIA'),
+    controller: envAddr('NEXT_PUBLIC_VAULT_CONTROLLER_ARB_SEPOLIA'),
     lens: envAddr('NEXT_PUBLIC_VAULT_LENS_ARB_SEPOLIA'),
     hook: envAddr('NEXT_PUBLIC_HOOK_ARB_SEPOLIA'),
     distributor: envAddr('NEXT_PUBLIC_DISTRIBUTOR_ARB_SEPOLIA'),
@@ -68,6 +72,17 @@ export const DEPLOYMENTS: Record<AppChainId, Deployment> = {
 
 export const getDeployment = (chainId: AppChainId): Deployment =>
   DEPLOYMENTS[chainId] ?? DEPLOYMENTS[DEFAULT_CHAIN_ID];
+
+const hasCoreDeployment = (deployment: Deployment | undefined): boolean =>
+  Boolean(deployment?.vault && deployment?.hook);
+
+export const getActiveDeploymentChainId = (chainId: number): AppChainId => {
+  const candidate: AppChainId =
+    chainId === arbitrum.id || chainId === arbitrumSepolia.id
+      ? chainId
+      : DEFAULT_CHAIN_ID;
+  return hasCoreDeployment(DEPLOYMENTS[candidate]) ? candidate : DEFAULT_CHAIN_ID;
+};
 
 // ── Swap infrastructure ──────────────────────────────────────────────────────
 // Universal Router (v4-aware) and V4Quoter, per chain. Permit2 is canonical.

@@ -1,0 +1,13 @@
+apiVersion: 1
+
+providers:
+  - name: the-pool-public
+    orgId: 1
+    folder: Public
+    folderUid: the-pool-public
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana-public/dashboards/the-pool

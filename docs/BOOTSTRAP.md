@@ -1,114 +1,158 @@
-# The Pool — Early Depositor Bootstrap Program
+# The Pool - Early Depositor Bootstrap Program
 
-One-page spec. Status: implemented at [src/BootstrapRewards.sol](../src/BootstrapRewards.sol). Tests at [test/BootstrapRewards.t.sol](../test/BootstrapRewards.t.sol) (26 unit tests).
+Public spec. Status: implemented at [src/BootstrapRewards.sol](../src/BootstrapRewards.sol). Tests at [test/BootstrapRewards.t.sol](../test/BootstrapRewards.t.sol) (27 unit tests).
 
----
+This document describes the current V2.1 bootstrap program and deployed defaults. The program is a temporary promotional rebate layered on top of the normal vault economics; it is not a token, not a permanent emissions program, and not a guarantee of yield.
 
-## 1. Offer (what users see)
+## 1. Offer
 
-> **Early Depositor Bonus — first $100K TVL, 180 days (six 30-day epochs).**
-> For the first 180 days after the vault opens, eligible depositors share **50% of treasury swap fees**, proportional to how long and how much they hold.
-> Paid monthly in USDC. Capped. Non-transferable. Not a token.
+> **Early Depositor Bonus - first $100K-equivalent vault shares, 180 days.**
+> During the program window, eligible depositors share 50% of USDC treasury-fee inflows that reach the bootstrap contract.
+> Rewards are time-weighted by vault shares held, paid in monthly epochs after finalization, capped, non-transferable, and paid in USDC.
 
-This is a yield kicker on top of the normal LP fee share, not a change to the base economics.
+This is a yield kicker on top of the normal LP-side hook donation and pool fee economics. It does not change the base hook, vault, or ERC-4626 share mechanics.
 
----
+## 2. Live V2.1 Wiring
 
-## 2. Parameters
+Current production addresses are tracked in [docs/DEPLOYED_ADDRESSES.md](DEPLOYED_ADDRESSES.md).
 
-| Parameter | Value | Rationale |
+| Item | Current V2.1 value |
+|---|---|
+| Bootstrap contract | `0x3E6Ed05c1140612310DDE0d0DDaAcCA6e0d7a03d` |
+| Vault | `0xf79c2dc829cd3a2d8ceec353bdb1b2414ba1eee0` |
+| FeeDistributor | `0x5757DA9014EE91055b244322a207EE6F066378B0` |
+| Payout asset | Native USDC, the vault asset |
+| Program start | `1777348921` |
+| Program end | `1792900921` |
+| Wiring | `FeeDistributor.treasury = BootstrapRewards`; `BootstrapRewards.realTreasury = Ledger`; `LiquidityVaultV2.bootstrapRewards = BootstrapRewards` |
+
+The FeeDistributor can send treasury fees in either pool currency. Only payout-asset inflows, currently USDC, fund the USDC bonus pool. Non-payout assets sent to the bootstrap contract are swept to the real treasury through `sweepToken()`.
+
+## 3. Parameters
+
+| Parameter | Value | Notes |
 |---|---|---|
-| Eligible TVL cap | **$100,000** in vault asset (USDC) | Matches the external-audit trigger in [README.md](../README.md). Above this, the program stops adding new eligible shares. |
-| Program duration | **180 days** from `programStart` | Short enough to be a bootstrap, long enough to cover a full market cycle. |
-| Treasury rebate share | **50% of treasury fees accrued during the program window** | Treasury share is currently `20%` of the 25 bps hook fee → rebate is ~2.5 bps of gross swap volume. The split is owner-tunable but hard-capped at 50% treasury / 50% LPs in [src/FeeDistributor.sol](../src/FeeDistributor.sol#L24) and [src/FeeDistributor.sol](../src/FeeDistributor.sol#L156-L157). |
-| Epoch length | **30 days** (6 epochs total) | Monthly payout; bounds gas and accounting windows. |
-| Per-epoch hard cap | **$10,000 USDC** | Protects the treasury if volume spikes. If `rebate > cap`, the excess stays in treasury. |
-| Accounting unit | **share-seconds** | Time-weighted; first-block snipers cannot farm a month's payout with a 1-block deposit. |
-| Minimum dwell | **7 days continuous position** before a user accrues share-seconds | Anti-flash-deposit. |
-| Eligible shares | `min(userShares, shares_equivalent_to_25k_USDC_per_wallet)` | Per-wallet cap prevents one whale from absorbing the bootstrap. |
-| Transfer behavior | Eligibility is address-based and depends on vault-share balance plus dwell state | Transferring shares can reset/disrupt accrual and may forfeit bonus; rewards are not tokenized or portable. |
-| Payout asset | **USDC** (the vault asset) | No new token. No vesting. |
-| Claim window | Rolling 90 days per epoch | Unclaimed amounts return to treasury. |
+| Program duration | 180 days from `programStart` | Six 30-day epochs. |
+| Epoch length | 30 days | Monthly accounting window. |
+| Finalization delay | 7 days after each epoch ends | Anyone can still `poke()` users; claims are locked until this delay passes. |
+| Claim window | 90 days after finalization | Unclaimed amounts can be swept to real treasury after the window closes. |
+| Bonus share | 50% of processed USDC treasury inflow | `bonusShareBps = 5000`; the remainder forwards to real treasury. |
+| Per-epoch bonus cap | 10,000 USDC | Excess USDC inflow forwards to real treasury. |
+| Eligible TVL cap | 100,000 USDC converted to vault shares at deployment | Matches the independent human-audit trigger in [README.md](../README.md). Per epoch, total eligible share-seconds are capped as if at most this share amount were eligible for the full epoch. |
+| Per-wallet cap | 25,000 USDC converted to vault shares at deployment | Balances above the cap are clipped, not excluded. |
+| Minimum dwell | 7 days continuous nonzero share balance before accrual starts | Anti-flash-deposit rule. |
+| Accounting unit | Share-seconds | Time-weighted by eligible vault shares. |
+| Transfer behavior | Address-based eligibility with vault auto-pokes | Share transfers are not portable bonus claims; the recipient has its own dwell/accrual state. |
+| Payout asset | USDC | No new token, no vesting wrapper. |
 
----
+The share caps are fixed at deployment by calling `vault.convertToShares()` on the USDC cap amounts. If vault share price changes later, the USDC-equivalent value of those fixed share caps may differ from the original dollar labels.
 
-## 3. Math (what the contract actually computes)
+## 4. Contract Math
 
-Per epoch `e`:
+`pullInflow()` is permissionless and idempotent. It processes only new payout-asset balance above already-tracked bonus pools:
 
-$$
-\text{bonusPool}_e = \min\!\Big(0.50 \times \text{treasuryFees}_e,\ \text{cap}_e\Big)
-$$
+```text
+processed = payoutAsset.balanceOf(bootstrap) - trackedUnclaimedBonusPools
+```
 
-Per user `u` in epoch `e`:
+If the program has not started or has already ended, all processed USDC forwards to `realTreasury`. During an active epoch:
 
-$$
-\text{userPayout}_{u,e} = \text{bonusPool}_e \times \frac{\text{shareSeconds}_{u,e}^{\text{eligible}}}{\sum_v \text{shareSeconds}_{v,e}^{\text{eligible}}}
-$$
+```text
+rawBonus = processed * bonusShareBps / 10_000
+toBonus = min(rawBonus, perEpochCap - currentEpochBonusPool)
+toTreasury = processed - toBonus
+```
 
-Where `shareSeconds_eligible` only accrues when:
-- the position has existed ≥ 7 days, **and**
-- `userShares ≤ perWalletCap`, **and**
-- global eligible share accrual has not exceeded the configured cap.
+For each user and epoch:
 
-Expected magnitude (gross, before IL/gas):
+```text
+eligibleShares = min(userShareBalance, perWalletShareCap)
+userShareSeconds += eligibleShares * eligibleSecondsAfterDwell
+```
 
-| Daily volume / TVL | Hook LP rebate APY (20 bps of volume) | Bootstrap bonus APY while active (2.5 bps of volume) | Combined hook-funded APY while active |
+The implementation uses a conservative lazy-poke model. For an unpoked interval, accrual is based on `min(lastBalance, currentBalance)`, so an unpoked balance reduction cannot over-credit a user. Unpoked balance increases do not retroactively boost accrual.
+
+Epoch-wide eligible share-seconds are capped:
+
+```text
+epochTotalShareSeconds <= globalShareCap * epochLength
+```
+
+User payout after finalization:
+
+```text
+userPayout = epochBonusPool * userShareSeconds / totalShareSeconds
+```
+
+`claim(epoch)` calls `_poke(msg.sender)` first, then pays pull-style if the epoch is finalized, the claim window is open, and the user has unclaimed share-seconds.
+
+## 5. Illustrative Magnitude
+
+Base-fee illustration, before impermanent loss, gas, vault performance fee, range downtime, reserve effects, volatility multiplier, fee cap changes, payout-asset mix, and program caps:
+
+```text
+base hook fee = 25 bps of AMM-routed swap flow
+LP-side donation = 25 bps * 80% = 20 bps
+treasury share = 25 bps * 20% = 5 bps
+bootstrap bonus = 5 bps * 50% = 2.5 bps of USDC treasury-eligible flow
+```
+
+| Daily volume / active TVL | LP-side hook donation APY (20 bps) | Bootstrap bonus APY while eligible (2.5 bps) | Combined hook-funded gross APY while eligible |
 |---|---:|---:|---:|
-| 0.10× | 7.30% | 0.91% | 8.21% |
-| 0.25× | 18.25% | 2.28% | 20.53% |
-| 0.50× | 36.50% | 4.56% | 41.06% |
-| 1.00× | 73.00% | 9.13% | 82.13% |
+| 0.10x | 7.30% | 0.91% | 8.21% |
+| 0.25x | 18.25% | 2.28% | 20.53% |
+| 0.50x | 36.50% | 4.56% | 41.06% |
+| 1.00x | 73.00% | 9.13% | 82.13% |
 
-Bonus rows are annualized; realized over a 180-day program, roughly halve the bonus column.
+The LP-side donation is pool-level fee growth for all in-range LPs. The bootstrap bonus is narrower: it is only for eligible vault shareholders and only from processed USDC treasury inflows during active epochs.
 
-Worst-case treasury spend (before per-epoch caps):
+Six-month bonus allocation before and after the 10,000 USDC per-epoch cap:
 
-| Sustained daily volume | 6-month rebate before cap | With $10k/epoch cap |
+| Sustained daily USDC-eligible volume | 180-day bonus before cap | With 10,000 USDC/epoch cap |
 |---|---:|---:|
-| $100k | $4,550 | $4,550 |
-| $300k | $13,650 | $13,650 |
-| $1.0M | $45,500 | $45,500 |
-| $1.32M+ | $60,000+ | $60,000 |
+| 100,000 USDC | 4,500 USDC | 4,500 USDC |
+| 300,000 USDC | 13,500 USDC | 13,500 USDC |
+| 1,000,000 USDC | 45,000 USDC | 45,000 USDC |
+| 1,340,000 USDC+ | 60,300 USDC+ | 60,000 USDC |
 
----
-
-## 4. Anti-gaming rules
+## 6. Anti-Gaming Rules
 
 | Vector | Control |
 |---|---|
-| Flash-deposit / same-block farming | 7-day minimum dwell before share-seconds start accruing. |
-| Whale dominating the bonus | Per-wallet eligibility cap of $25k. |
-| Sybil splitting | Not fully solvable on-chain; acceptable at this size. At $100k TVL cap, Sybil returns are bounded by the per-epoch cap. |
-| Share-token transfer to farm multiple wallets | Eligibility is address-based and tied to balance+dwell accrual. Transfers can reset/disrupt accrual windows and are not a reliable way to transfer bonus eligibility. |
-| Sandwich / wash-trading to inflate treasury fees | Already mitigated by the 1.5× volatility multiplier + per-block reference-price update: [src/DynamicFeeHookV2.sol](../src/DynamicFeeHookV2.sol#L61-L62), [src/DynamicFeeHookV2.sol](../src/DynamicFeeHookV2.sol#L543-L548). Volatile wash trades pay 1.5× to the same treasury pool that funds the rebate. |
-| Treasury drain by spike | `cap_e = $10k` per epoch; excess stays in treasury. |
+| Flash deposit or same-block farming | 7-day dwell before share-seconds accrue. |
+| One wallet dominating rewards | Per-wallet cap clips eligible shares to the deployment-time 25,000 USDC share equivalent. |
+| Program over-allocation | Per-epoch bonus cap and epoch-wide global share-seconds cap. |
+| Sybil splitting | Not fully solvable on-chain; returns are bounded by the 100,000 USDC global share cap and 10,000 USDC per-epoch bonus cap. |
+| Share transfer farming | Eligibility is address-based. Vault share movements auto-poke both sides, and recipients have their own dwell/accrual state. |
+| Lazy-poke over-crediting after withdrawals | Accrual uses the lower of last recorded and current balance for the unpoked interval. |
+| Wash trading to inflate treasury fees | Attackers still pay hook fees, pool execution costs, spread/slippage, and gas; volatile moves can increase hook fees, and bonus payouts are capped per epoch. |
+| Foreign-token treasury inflow | Non-USDC assets do not fund the USDC bonus pool; owner sweeps them to real treasury. |
 
----
+## 7. Operational Notes
 
-## 5. Implementation sketch
+- `pullInflow()` can be called by anyone and should be run by keeper/UI automation when USDC has accumulated on the bootstrap contract.
+- `poke(user)` can be called by anyone. `LiquidityVaultV2` auto-pokes configured BootstrapRewards on mint, burn, and transfer, but frontends can still batch-poke known users before finalization or claims.
+- `claim(epoch)` opens only after epoch end plus the 7-day finalization delay, and only during the 90-day claim window.
+- `sweepEpoch(epoch)` can be called by anyone after the claim window closes; it returns unclaimed USDC to real treasury.
+- `sweepToken(token)` is owner-only and cannot sweep the payout asset.
+- `setRealTreasury(newTreasury)` is owner-only.
 
-Public summary:
+## 8. Caveats
 
-- A fixed share of treasury fees is routed to the early-depositor bonus program for 180 days.
-- Rewards are time-weighted by deposit size and time in the vault, with clear per-wallet and per-epoch caps.
-- Bonus payouts are made in USDC on monthly epochs during a defined claim window.
-- Any unclaimed monthly bonus is returned to treasury after the claim window closes.
-- This program is additive to normal LP fee earnings and does not change base hook/vault economics.
+- This is a temporary promotional rebate, not protocol yield and not a return promise.
+- Rewards depend on processed USDC treasury inflow. Hook fees paid in non-USDC currencies do not automatically become USDC rewards.
+- Share-seconds accrue only after 7 days of continuous nonzero balance.
+- Share caps are deployment-time share caps; their later USDC-equivalent value can move with vault share price.
+- Program caps can limit rewards even if volume is higher.
+- Impermanent loss, range placement, reserve execution, keeper uptime, gas, and smart-contract risk are unchanged by the program.
+- The vault can hold idle USDC, other-token inventory, reserve escrow/proceeds, and v4 liquidity. When liquidity is active and in range, vault inventory can change composition.
+- Owner controls exist: vault pause, vault performance fee up to 20%, hook fee cap up to 10%, treasury share up to 50%, real-treasury updates, and non-payout-token sweeps.
+- Internal automated review is not a substitute for a third-party human audit. TSI Audit Scanner reports are in [audits/TSI-Audit-Scanner_2026-04-25.md](../audits/TSI-Audit-Scanner_2026-04-25.md) and [audits/TSI-Audit-Scanner_2026-04-27.md](../audits/TSI-Audit-Scanner_2026-04-27.md). The operational companion is [docs/HOOK-RISK-RUNBOOK.md](HOOK-RISK-RUNBOOK.md). The project README documents the independent human-audit trigger at 100,000 USDC TVL.
 
-Technical implementation details are intentionally omitted from this public document.
+## 9. Public Summary
 
----
-
-## 6. Honest caveats 
-
-- The bonus is a **temporary promotional rebate**, not protocol yield. It ends at the earlier of 180 days (six 30-day epochs) or program cap exhaustion.
-- Share-seconds accrual **starts after 7 days of continuous deposit**.
-- Transferring vault shares can reset/disrupt dwell and accrual state, and may forfeit pending bonus.
-- Impermanent loss and smart-contract risk are unchanged by the program. The vault is single-sided OOR; if the price moves into range, part of your USDC converts to the other asset. See [src/LiquidityVaultV2.sol](../src/LiquidityVaultV2.sol).
-- Internal automated audit (TSI Audit Scanner) includes a V2.2 hardening re-test on 2026-04-27; findings were remediated and re-tested. Full report: [audits/TSI-Audit-Scanner_2026-04-25.md](../audits/TSI-Audit-Scanner_2026-04-25.md). Operational companion: [docs/HOOK-RISK-RUNBOOK.md](HOOK-RISK-RUNBOOK.md). Internal-audit summary: [README.md](../README.md).
-- Owner controls (pause, performance fee up to 20%, hook fee cap up to 10%, treasury share up to 50%) exist; see [src/LiquidityVaultV2.sol](../src/LiquidityVaultV2.sol#L953-L954) (`pause`/`unpause`), [src/LiquidityVaultV2.sol](../src/LiquidityVaultV2.sol#L928) (`setPerformanceFeeBps`), [src/DynamicFeeHookV2.sol](../src/DynamicFeeHookV2.sol#L623) (`setMaxFeeBps`), [src/FeeDistributor.sol](../src/FeeDistributor.sol#L156-L157) (`setTreasuryShare`).
-
----
-
-
+- A fixed share of USDC treasury fees is routed to an early-depositor bonus program for 180 days.
+- Rewards are time-weighted by eligible vault shares and continuous holding time.
+- Per-wallet, per-epoch, and global eligibility caps keep the program bounded.
+- Rewards are pull-claimed in USDC after monthly epochs finalize.
+- The program is additive to normal LP economics and does not change base hook/vault behavior.

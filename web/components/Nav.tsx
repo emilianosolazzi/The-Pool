@@ -4,21 +4,18 @@ import { ConnectButton } from '@rainbow-me/rainbowkit';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useChainId } from 'wagmi';
-import { arbitrum, arbitrumSepolia } from 'wagmi/chains';
-import { DEFAULT_CHAIN_ID, getDeployment, type AppChainId } from '@/lib/deployments';
+import { getActiveDeploymentChainId, getDeployment } from '@/lib/deployments';
 
 export function Nav() {
   const pathname = usePathname();
   const onHome = pathname === '/';
   const chainId = useChainId();
-  const activeChainId: AppChainId =
-    chainId === arbitrum.id || chainId === arbitrumSepolia.id
-      ? chainId
-      : DEFAULT_CHAIN_ID;
+  const activeChainId = getActiveDeploymentChainId(chainId);
   const deployment = getDeployment(activeChainId);
 
   const howHref = onHome ? '#how' : '/#how';
   const vaultHref = onHome ? '#vault' : '/#vault';
+  const reserveHref = onHome ? '#reserve' : '/#reserve';
   const externalIcon = (
     <svg viewBox="0 0 16 16" aria-hidden="true" className="h-3.5 w-3.5">
       <path
@@ -46,6 +43,7 @@ export function Nav() {
           <Link href={howHref} className="hover:text-white">How it works</Link>
           <Link href="/value" className="hover:text-white">Value Calculator</Link>
           <Link href={vaultHref} className="hover:text-white">Vault</Link>
+          <Link href={reserveHref} className="hover:text-white">Reserve desk</Link>
           {deployment.swapUrl ? (
             <a
               href={deployment.swapUrl}

@@ -1,7 +1,7 @@
 'use client';
 
 import { useChainId } from 'wagmi';
-import { arbitrum, arbitrumSepolia } from 'wagmi/chains';
+import { arbitrumSepolia } from 'wagmi/chains';
 import { Nav } from '@/components/Nav';
 import { Hero } from '@/components/Hero';
 import { PlainEnglish } from '@/components/PlainEnglish';
@@ -11,14 +11,13 @@ import { BootstrapPanel } from '@/components/BootstrapPanel';
 import { SwapPanel } from '@/components/SwapPanel';
 import { HowItWorks } from '@/components/HowItWorks';
 import { Footer } from '@/components/Footer';
-import { DEFAULT_CHAIN_ID, getDeployment, type AppChainId } from '@/lib/deployments';
+import { ReserveStatus } from '@/components/ReserveStatus';
+import { OwnerPanel } from '@/components/OwnerPanel';
+import { getActiveDeploymentChainId, getDeployment } from '@/lib/deployments';
 
 export default function HomePage() {
   const chainId = useChainId();
-  const activeChainId: AppChainId =
-    chainId === arbitrum.id || chainId === arbitrumSepolia.id
-      ? chainId
-      : DEFAULT_CHAIN_ID;
+  const activeChainId = getActiveDeploymentChainId(chainId);
   const deployment = getDeployment(activeChainId);
   const explorerBase =
     activeChainId === arbitrumSepolia.id
@@ -60,6 +59,18 @@ export default function HomePage() {
         />
 
         <SwapPanel
+          deployment={deployment}
+          chainId={activeChainId}
+          explorerBase={explorerBase}
+        />
+
+        <ReserveStatus
+          deployment={deployment}
+          chainId={activeChainId}
+          explorerBase={explorerBase}
+        />
+
+        <OwnerPanel
           deployment={deployment}
           chainId={activeChainId}
           explorerBase={explorerBase}

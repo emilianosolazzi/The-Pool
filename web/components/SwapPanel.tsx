@@ -30,6 +30,8 @@ import {
   universalRouterAbi,
   v4QuoterAbi,
   permit2Abi,
+  hookAbi,
+  distributorAbi,
 } from '@/lib/abis';
 import { fmtUnits } from '@/lib/format';
 import {
@@ -48,8 +50,10 @@ import {
 } from '@/lib/swap';
 
 const HOOK_FEE_BPS = 25n;          // DynamicFeeHookV2 base hook fee
-const TREASURY_SHARE_BPS = 2000n;  // FeeDistributor default 20%
-const LP_DONATION_BPS = 10_000n - TREASURY_SHARE_BPS;
+// Default split shown before on-chain reads resolve. The live split is read
+// from FeeDistributor.treasuryShare / SHARE_DENOMINATOR every render — the
+// owner can re-balance this up to MAX_TREASURY_SHARE (50%) at any time.
+const DEFAULT_TREASURY_SHARE_BPS = 2000n;
 const SLIPPAGE_PRESETS = [10, 50, 100]; // 0.1% / 0.5% / 1.0%
 
 interface SwapPanelProps {
@@ -224,8 +228,42 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
   const feeBasisDecimals = amountOut ? outputDecimals : inputDecimals;
   const feeBasisSymbol = amountOut ? outputSymbol : inputSymbol;
 
+  // ── Live fee split from FeeDistributor ─────────────────────────────────
+  // treasuryShare is owner-adjustable (0..MAX_TREASURY_SHARE=50 out of
+  // SHARE_DENOMINATOR=100). Read both so the displayed split survives any
+  // future setTreasuryShare without requiring a frontend redeploy.
+  const { data: distributorAddrData } = useReadContract({
+    address: hook,
+    abi: hookAbi,
+    functionName: 'feeDistributor',
+    chainId,
+    query: { enabled: supported && Boolean(hook), staleTime: 60_000 },
+  });
+  const distributorAddr = distributorAddrData as Address | undefined;
+  const { data: distReads } = useReadContracts({
+    contracts:
+      distributorAddr && distributorAddr !== ZERO
+        ? ([
+            { address: distributorAddr, abi: distributorAbi, functionName: 'treasuryShare', chainId },
+            { address: distributorAddr, abi: distributorAbi, functionName: 'SHARE_DENOMINATOR', chainId },
+          ] as const)
+        : [],
+    query: { enabled: Boolean(distributorAddr) && distributorAddr !== ZERO, staleTime: 60_000 },
+  });
+  const treasuryShareRaw = distReads?.[0]?.result as bigint | undefined;
+  const shareDenomRaw = distReads?.[1]?.result as bigint | undefined;
+  const treasuryShareBps = useMemo(() => {
+    if (treasuryShareRaw !== undefined && shareDenomRaw && shareDenomRaw > 0n) {
+      return (treasuryShareRaw * 10_000n) / shareDenomRaw;
+    }
+    return DEFAULT_TREASURY_SHARE_BPS;
+  }, [treasuryShareRaw, shareDenomRaw]);
+  const lpDonationBps = 10_000n - treasuryShareBps;
+  const treasuryPctLabel = `${(Number(treasuryShareBps) / 100).toFixed(treasuryShareBps % 100n === 0n ? 0 : 2)}%`;
+  const lpPctLabel = `${(Number(lpDonationBps) / 100).toFixed(lpDonationBps % 100n === 0n ? 0 : 2)}%`;
+
   const hookFee = (feeBasisAmount * HOOK_FEE_BPS) / 10_000n;
-  const treasuryAmount = (hookFee * TREASURY_SHARE_BPS) / 10_000n;
+  const treasuryAmount = (hookFee * treasuryShareBps) / 10_000n;
   const lpDonation = hookFee - treasuryAmount;
   const userShareOfDonation =
     userShares && totalShares && totalShares > 0n
@@ -390,14 +428,15 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
           </div>
         ) : null}
         {!poolSeeded ? (
-          <div className="mb-4 rounded-xl border border-amber-400/30 bg-amber-500/5 p-3 text-xs text-amber-200">
+          <div className="mb-4 rounded-xl border border-amber-400/30 bg-amber-500/5 p-3 text-xs text-amber-200 break-words">
             <div className="font-semibold text-amber-100">Low deployed liquidity (informational)</div>
             <div className="mt-1 text-amber-200/80">
               Vault reports little or no deployed liquidity. Quotes from the V4Quoter are
               authoritative — if a quote returns, the swap is enabled. Quote failures
               may indicate the pool has no in-range liquidity (e.g. a single-sided USDC
-              position outside the live tick), in which case
-              <code className="text-amber-100">NoLiquidityToReceiveFees</code> can revert.
+              position outside the live tick), in which case{' '}
+              <code className="break-all text-amber-100">NoLiquidityToReceiveFees</code>{' '}
+              can revert.
             </div>
           </div>
         ) : null}
@@ -420,23 +459,24 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
               {inputSymbol}
             </span>
           </div>
-          <div className="mt-2 flex items-center gap-3">
+          <div className="mt-2 flex items-center gap-2">
             <input
               type="text"
               inputMode="decimal"
+              size={1}
               placeholder="0.0"
               value={amount}
               onChange={(e) => { setAmount(e.target.value.replace(/[^\d.]/g, '')); setPlanError(null); }}
-              className="flex-1 bg-transparent text-2xl font-medium text-white outline-none"
+              className="min-w-0 flex-1 bg-transparent text-2xl font-medium text-white outline-none"
             />
             <button
               type="button"
               onClick={onMax}
-              className="rounded-lg border border-white/10 px-2 py-1 text-xs text-zinc-300 hover:border-white/20"
+              className="shrink-0 rounded-lg border border-white/10 px-2 py-1 text-xs text-zinc-300 hover:border-white/20"
             >
               MAX
             </button>
-            <span className="rounded-xl bg-white/5 px-3 py-2 text-sm font-semibold text-white">
+            <span className="shrink-0 rounded-xl bg-white/5 px-3 py-2 text-sm font-semibold text-white">
               {inputSymbol}
             </span>
           </div>
@@ -464,11 +504,11 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
               {outputSymbol}
             </span>
           </div>
-          <div className="mt-2 flex items-center gap-3">
-            <span className="flex-1 text-2xl font-medium text-white">
+          <div className="mt-2 flex items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-2xl font-medium text-white">
               {amountOut ? fmtUnits(amountOut, outputDecimals, inputIsUSDC ? 6 : 2) : '0.0'}
             </span>
-            <span className="rounded-xl bg-white/5 px-3 py-2 text-sm font-semibold text-white">
+            <span className="shrink-0 rounded-xl bg-white/5 px-3 py-2 text-sm font-semibold text-white">
               {outputSymbol}
             </span>
           </div>
@@ -517,12 +557,12 @@ export function SwapPanel({ deployment, chainId, explorerBase }: SwapPanelProps)
                 value={`${fmtUnits(hookFee, feeBasisDecimals, feeBasisDecimals === 6 ? 4 : 6)} ${feeBasisSymbol}`}
               />
               <Row
-                label="↳ Treasury (20%)"
+                label={`↳ Treasury (${treasuryPctLabel})`}
                 value={`${fmtUnits(treasuryAmount, feeBasisDecimals, feeBasisDecimals === 6 ? 4 : 6)} ${feeBasisSymbol}`}
                 muted
               />
               <Row
-                label="↳ LP donation (80%)"
+                label={`↳ LP donation (${lpPctLabel})`}
                 value={`${fmtUnits(lpDonation, feeBasisDecimals, feeBasisDecimals === 6 ? 4 : 6)} ${feeBasisSymbol}`}
                 muted
               />

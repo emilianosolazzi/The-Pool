@@ -51,6 +51,8 @@ For operator procedures, trust assumptions, and failure-mode response, see [`doc
 
 For detailed mathematical examples of yield generation and APY calculations, see [`docs/VALUE-EXAMPLES.md`](docs/VALUE-EXAMPLES.md).
 
+For an investor-facing volume thesis and scenario-based ROI model, see [`docs/INVESTOR-README.md`](docs/INVESTOR-README.md).
+
 For code examples and integration snippets, see [`docs/CODE-EXAMPLES.md`](docs/CODE-EXAMPLES.md).
 
 ---
