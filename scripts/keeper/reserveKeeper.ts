@@ -28,6 +28,7 @@
  *   ASSET_PER_NATIVE_E18      0        // asset units per 1e18 wei native;
  *                                      // 0 disables the profitability guard
  *   DRY_RUN                   false    // simulate only, do not broadcast
+ *   READ_ONLY                 false    // scrape state only; no key required
  *   LOOP                      false    // run forever vs single tick
  *   INTERVAL_MS               60000    // base sleep between ticks
  *   JITTER_MS                 15000    // random extra sleep [0, JITTER_MS]
@@ -52,7 +53,11 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { createServer, type Server } from 'node:http';
 
 const RPC_URL = mustEnv('ARBITRUM_RPC_URL');
-const KEEPER_PRIVATE_KEY = mustEnv('KEEPER_PRIVATE_KEY') as `0x${string}`;
+const READ_ONLY = process.env.READ_ONLY === 'true';
+const KEEPER_PRIVATE_KEY = process.env.KEEPER_PRIVATE_KEY as `0x${string}` | undefined;
+if (!READ_ONLY && !KEEPER_PRIVATE_KEY) {
+  throw new Error('Missing env KEEPER_PRIVATE_KEY');
+}
 
 const VAULT = mustEnv('VAULT') as Address;
 const VAULT_LENS = mustEnv('VAULT_LENS') as Address;
@@ -148,9 +153,11 @@ const controllerGuardAbi = parseAbi([
 
 const vaultLensAbi = parseAbi([
   'function vaultStatus(address vault) view returns (uint8)',
+  'function getVaultStats(address vault) view returns (uint256 tvl,uint256 sharePrice,uint256 depositors,uint256 liqDeployed,uint256 yieldColl,string feeDesc)',
 ]);
 
 const hookAbi = parseAbi([
+  'function getStats() view returns (uint256 totalSwaps,uint256 totalFeesRouted,address distributor,uint256 totalReserveFills,uint256 totalReserveSold)',
   'function getOfferHealth((address currency0,address currency1,uint24 fee,int24 tickSpacing,address hooks) key,address vault) view returns (bool active,int256 driftBps,uint256 escrow0,uint256 escrow1,uint256 proceeds0,uint256 proceeds1,uint160 vaultSqrtPriceX96,uint160 poolSqrtPriceX96)',
   // Storage-level offer view. NOTE: `active` here is the raw storage flag.
   // The hook does NOT auto-clear it on expiry (`_tryFillReserve` just
@@ -166,18 +173,20 @@ const erc20Abi = parseAbi([
   'function decimals() view returns (uint8)',
 ]);
 
-const account = privateKeyToAccount(KEEPER_PRIVATE_KEY);
+const account = KEEPER_PRIVATE_KEY ? privateKeyToAccount(KEEPER_PRIVATE_KEY) : undefined;
 
 const publicClient = createPublicClient({
   chain: arbitrum,
   transport: http(RPC_URL),
 });
 
-const walletClient = createWalletClient({
-  account,
-  chain: arbitrum,
-  transport: http(RPC_URL),
-});
+const walletClient = account
+  ? createWalletClient({
+      account,
+      chain: arbitrum,
+      transport: http(RPC_URL),
+    })
+  : undefined;
 
 function abs(x: bigint): bigint {
   return x < 0n ? -x : x;
@@ -206,6 +215,26 @@ const metrics = {
   lastVaultStatus: -1,
   lastFailedAsset: 0n,
   lastOfferActive: 0,
+  lastOfferState: 0,
+  lastOfferExpired: 0,
+  lastOfferFillable: 0,
+  lastVaultTvlAsset: 0n,
+  lastVaultSharePriceE18: 0n,
+  lastVaultDepositors: 0n,
+  lastVaultLiquidityDeployedAsset: 0n,
+  lastVaultYieldCollectedAsset: 0n,
+  lastOfferSellRemaining: 0n,
+  lastOfferExpiresAtSec: 0,
+  lastOfferSellingAsset: 0,
+  lastOfferPricingMode: -1,
+  lastEscrowCurrency0: 0n,
+  lastEscrowCurrency1: 0n,
+  lastProceedsCurrency0: 0n,
+  lastProceedsCurrency1: 0n,
+  lastHookTotalSwaps: 0n,
+  lastHookTotalFeesRouted: 0n,
+  lastHookTotalReserveFills: 0n,
+  lastHookTotalReserveSold: 0n,
 };
 
 function logMetrics() {
@@ -216,6 +245,20 @@ function logMetrics() {
     lastIdleAsset: metrics.lastIdleAsset.toString(),
     lastDriftBps: metrics.lastDriftBps.toString(),
     lastFailedAsset: metrics.lastFailedAsset.toString(),
+    lastVaultTvlAsset: metrics.lastVaultTvlAsset.toString(),
+    lastVaultSharePriceE18: metrics.lastVaultSharePriceE18.toString(),
+    lastVaultDepositors: metrics.lastVaultDepositors.toString(),
+    lastVaultLiquidityDeployedAsset: metrics.lastVaultLiquidityDeployedAsset.toString(),
+    lastVaultYieldCollectedAsset: metrics.lastVaultYieldCollectedAsset.toString(),
+    lastOfferSellRemaining: metrics.lastOfferSellRemaining.toString(),
+    lastEscrowCurrency0: metrics.lastEscrowCurrency0.toString(),
+    lastEscrowCurrency1: metrics.lastEscrowCurrency1.toString(),
+    lastProceedsCurrency0: metrics.lastProceedsCurrency0.toString(),
+    lastProceedsCurrency1: metrics.lastProceedsCurrency1.toString(),
+    lastHookTotalSwaps: metrics.lastHookTotalSwaps.toString(),
+    lastHookTotalFeesRouted: metrics.lastHookTotalFeesRouted.toString(),
+    lastHookTotalReserveFills: metrics.lastHookTotalReserveFills.toString(),
+    lastHookTotalReserveSold: metrics.lastHookTotalReserveSold.toString(),
   });
 }
 
@@ -249,6 +292,26 @@ function renderProm(): string {
   push('keeper_vault_status', 'gauge', 'VaultLens.vaultStatus enum (-1=unknown).', metrics.lastVaultStatus);
   push('keeper_failed_distribution_asset', 'gauge', 'Hook failedDistribution[asset] last tick.', metrics.lastFailedAsset);
   push('keeper_offer_active', 'gauge', '1 if storage-flag active offer existed last tick, else 0.', metrics.lastOfferActive);
+  push('keeper_offer_state', 'gauge', 'Reserve offer state: 0=none, 1=live, 2=expired.', metrics.lastOfferState);
+  push('keeper_offer_expired', 'gauge', '1 if storage-flag active offer is past expiry, else 0.', metrics.lastOfferExpired);
+  push('keeper_offer_fillable', 'gauge', '1 if reserve offer is active and not expired, else 0.', metrics.lastOfferFillable);
+  push('keeper_vault_tvl_asset', 'gauge', 'Vault totalAssets() via VaultLens, in asset units.', metrics.lastVaultTvlAsset);
+  push('keeper_vault_share_price_e18', 'gauge', 'Vault share price from VaultLens, scaled by 1e18.', metrics.lastVaultSharePriceE18);
+  push('keeper_vault_depositors', 'gauge', 'Vault totalDepositors() via VaultLens.', metrics.lastVaultDepositors);
+  push('keeper_vault_liquidity_deployed_asset', 'gauge', 'Vault assetsDeployed() via VaultLens, in asset units.', metrics.lastVaultLiquidityDeployedAsset);
+  push('keeper_vault_yield_collected_asset', 'gauge', 'Vault totalYieldCollected() via VaultLens, in asset units.', metrics.lastVaultYieldCollectedAsset);
+  push('keeper_offer_sell_remaining_asset', 'gauge', 'Active offer sellRemaining when it sells the vault asset, else 0.', metrics.lastOfferSellRemaining);
+  push('keeper_offer_expires_at_seconds', 'gauge', 'Unix expiry of active reserve offer, else 0.', metrics.lastOfferExpiresAtSec);
+  push('keeper_offer_selling_asset', 'gauge', '1 if active offer sells the vault asset, else 0.', metrics.lastOfferSellingAsset);
+  push('keeper_offer_pricing_mode', 'gauge', 'Active reserve offer pricing mode enum, else -1.', metrics.lastOfferPricingMode);
+  push('keeper_escrow_currency0', 'gauge', 'Hook escrowedReserve[vault][currency0] last tick.', metrics.lastEscrowCurrency0);
+  push('keeper_escrow_currency1', 'gauge', 'Hook escrowedReserve[vault][currency1] last tick.', metrics.lastEscrowCurrency1);
+  push('keeper_proceeds_currency0', 'gauge', 'Hook proceedsOwed[vault][currency0] last tick.', metrics.lastProceedsCurrency0);
+  push('keeper_proceeds_currency1', 'gauge', 'Hook proceedsOwed[vault][currency1] last tick.', metrics.lastProceedsCurrency1);
+  push('keeper_hook_total_swaps', 'gauge', 'Hook totalSwaps() last tick.', metrics.lastHookTotalSwaps);
+  push('keeper_hook_total_fees_routed', 'gauge', 'Hook totalFeesRouted() last tick, raw hook units.', metrics.lastHookTotalFeesRouted);
+  push('keeper_hook_total_reserve_fills', 'gauge', 'Hook totalReserveFills() last tick.', metrics.lastHookTotalReserveFills);
+  push('keeper_hook_total_reserve_sold_asset', 'gauge', 'Hook totalReserveSold() last tick, raw sellCurrency units.', metrics.lastHookTotalReserveSold);
   push('keeper_spread_bps_config', 'gauge', 'Configured SPREAD_BPS env.', SPREAD_BPS);
   push('keeper_rebalance_drift_bps_config', 'gauge', 'Configured REBALANCE_DRIFT_BPS env.', REBALANCE_DRIFT_BPS);
   return lines.join('\n') + '\n';
@@ -370,7 +433,7 @@ async function sendOrPrint(
   console.log({ functionName, args: args.map(String) });
 
   // Profitability guard.
-  if (ASSET_PER_NATIVE_E18 > 0n && !DRY_RUN) {
+  if (ASSET_PER_NATIVE_E18 > 0n && !DRY_RUN && account) {
     try {
       const [gas, gasPrice] = await Promise.all([
         publicClient.estimateContractGas({
@@ -408,6 +471,10 @@ async function sendOrPrint(
   if (DRY_RUN) {
     console.log('DRY_RUN=true, not sending tx.');
     return;
+  }
+
+  if (!account || !walletClient) {
+    throw new Error('KEEPER_PRIVATE_KEY is required for write actions.');
   }
 
   const { request } = await publicClient.simulateContract({
@@ -491,43 +558,51 @@ async function tick() {
     );
   }
 
-  if (CONTROLLER_MODE) {
-    const writeTargetLower = WRITE_TARGET.toLowerCase();
-    if (ownerAddr.toLowerCase() !== writeTargetLower) {
-      throw new Error(
-        `KEEPER_WRITE_TARGET ${WRITE_TARGET} is not vault owner ${ownerAddr}.`,
-      );
+  if (READ_ONLY) {
+    console.log('READ_ONLY=true, skipping keeper authorization and write decisions.');
+  } else {
+    if (!account) {
+      throw new Error('KEEPER_PRIVATE_KEY is required unless READ_ONLY=true.');
     }
 
-    const [controllerVault, keeperAllowed] = await Promise.all([
-      publicClient.readContract({
-        address: WRITE_TARGET,
-        abi: controllerGuardAbi,
-        functionName: 'vault',
-      }),
-      publicClient.readContract({
-        address: WRITE_TARGET,
-        abi: controllerGuardAbi,
-        functionName: 'reserveKeepers',
-        args: [account.address],
-      }),
-    ]);
+    if (CONTROLLER_MODE) {
+      const writeTargetLower = WRITE_TARGET.toLowerCase();
+      if (ownerAddr.toLowerCase() !== writeTargetLower) {
+        throw new Error(
+          `KEEPER_WRITE_TARGET ${WRITE_TARGET} is not vault owner ${ownerAddr}.`,
+        );
+      }
 
-    if (controllerVault.toLowerCase() !== VAULT.toLowerCase()) {
+      const [controllerVault, keeperAllowed] = await Promise.all([
+        publicClient.readContract({
+          address: WRITE_TARGET,
+          abi: controllerGuardAbi,
+          functionName: 'vault',
+        }),
+        publicClient.readContract({
+          address: WRITE_TARGET,
+          abi: controllerGuardAbi,
+          functionName: 'reserveKeepers',
+          args: [account.address],
+        }),
+      ]);
+
+      if (controllerVault.toLowerCase() !== VAULT.toLowerCase()) {
+        throw new Error(
+          `KEEPER_WRITE_TARGET ${WRITE_TARGET} controls vault ${controllerVault}, not env VAULT ${VAULT}.`,
+        );
+      }
+      if (!keeperAllowed) {
+        throw new Error(
+          `Keeper key ${account.address} is not allowlisted in controller.reserveKeepers.`,
+        );
+      }
+    } else if (ownerAddr.toLowerCase() !== account.address.toLowerCase()) {
       throw new Error(
-        `KEEPER_WRITE_TARGET ${WRITE_TARGET} controls vault ${controllerVault}, not env VAULT ${VAULT}.`,
+        `Keeper key ${account.address} is not vault owner ${ownerAddr}. ` +
+          `Set KEEPER_WRITE_TARGET to the controller when the vault is controller-owned.`,
       );
     }
-    if (!keeperAllowed) {
-      throw new Error(
-        `Keeper key ${account.address} is not allowlisted in controller.reserveKeepers.`,
-      );
-    }
-  } else if (ownerAddr.toLowerCase() !== account.address.toLowerCase()) {
-    throw new Error(
-      `Keeper key ${account.address} is not vault owner ${ownerAddr}. ` +
-        `Set KEEPER_WRITE_TARGET to the controller when the vault is controller-owned.`,
-    );
   }
 
   metrics.lastVaultStatus = Number(vaultStatus);
@@ -575,8 +650,41 @@ async function tick() {
     args: [asset],
   });
 
+  const [vaultStats, hookStats, onchainOffer] = await Promise.all([
+    publicClient.readContract({
+      address: VAULT_LENS,
+      abi: vaultLensAbi,
+      functionName: 'getVaultStats',
+      args: [VAULT],
+    }),
+    publicClient.readContract({
+      address: HOOK,
+      abi: hookAbi,
+      functionName: 'getStats',
+    }),
+    active
+      ? publicClient.readContract({
+          address: HOOK,
+          abi: hookAbi,
+          functionName: 'getOffer',
+          args: [poolKey],
+        })
+      : Promise.resolve(undefined),
+  ]);
+
+  const [vaultTvl, sharePrice, depositors, liquidityDeployed, yieldCollected] = vaultStats;
+  const [totalSwaps, totalFeesRouted, , totalReserveFills, totalReserveSold] = hookStats;
+  const offerSellRemaining = onchainOffer?.sellCurrency.toLowerCase() === assetLower
+    ? onchainOffer.sellRemaining
+    : 0n;
+  const nowSec = BigInt(Math.floor(Date.now() / 1000));
+  const offerExpired = Boolean(
+    active && onchainOffer && onchainOffer.expiry !== 0n && nowSec > onchainOffer.expiry,
+  );
+  const offerState = active ? (offerExpired ? 2 : 1) : 0;
+
   console.log({
-    keeper: account.address,
+    keeper: account?.address ?? 'read-only',
     writeTarget: WRITE_TARGET,
     controllerMode: CONTROLLER_MODE,
     asset,
@@ -590,6 +698,16 @@ async function tick() {
     currentVaultSqrt: currentVaultSqrt.toString(),
     poolSqrt: poolSqrt.toString(),
     failedAsset: failedAsset.toString(),
+    vaultTvl: vaultTvl.toString(),
+    sharePrice: sharePrice.toString(),
+    depositors: depositors.toString(),
+    liquidityDeployed: liquidityDeployed.toString(),
+    yieldCollected: yieldCollected.toString(),
+    offerSellRemaining: offerSellRemaining.toString(),
+    offerExpiry: onchainOffer?.expiry.toString() ?? '0',
+    offerState,
+    totalReserveFills: totalReserveFills.toString(),
+    totalReserveSold: totalReserveSold.toString(),
     vaultStatus,
   });
 
@@ -599,6 +717,26 @@ async function tick() {
   metrics.lastDriftBps = driftBps;
   metrics.lastFailedAsset = failedAsset;
   metrics.lastOfferActive = active ? 1 : 0;
+  metrics.lastOfferState = offerState;
+  metrics.lastOfferExpired = offerExpired ? 1 : 0;
+  metrics.lastOfferFillable = offerState === 1 ? 1 : 0;
+  metrics.lastVaultTvlAsset = vaultTvl;
+  metrics.lastVaultSharePriceE18 = sharePrice;
+  metrics.lastVaultDepositors = depositors;
+  metrics.lastVaultLiquidityDeployedAsset = liquidityDeployed;
+  metrics.lastVaultYieldCollectedAsset = yieldCollected;
+  metrics.lastOfferSellRemaining = offerSellRemaining;
+  metrics.lastOfferExpiresAtSec = Number(onchainOffer?.expiry ?? 0n);
+  metrics.lastOfferSellingAsset = onchainOffer?.sellCurrency.toLowerCase() === assetLower ? 1 : 0;
+  metrics.lastOfferPricingMode = onchainOffer ? Number(onchainOffer.pricingMode) : -1;
+  metrics.lastEscrowCurrency0 = escrow0;
+  metrics.lastEscrowCurrency1 = escrow1;
+  metrics.lastProceedsCurrency0 = proceeds0;
+  metrics.lastProceedsCurrency1 = proceeds1;
+  metrics.lastHookTotalSwaps = totalSwaps;
+  metrics.lastHookTotalFeesRouted = totalFeesRouted;
+  metrics.lastHookTotalReserveFills = totalReserveFills;
+  metrics.lastHookTotalReserveSold = totalReserveSold;
 
   if (failedAsset > 0n) {
     console.warn(
@@ -610,6 +748,12 @@ async function tick() {
       `failedDistribution[${asset}]=${failedAsset} on hook ${HOOK}. Owner must acknowledgeFailedDistribution.`,
       'error',
     );
+  }
+
+  if (READ_ONLY) {
+    metrics.noops += 1;
+    console.log('READ_ONLY=true, gauges refreshed; no write action evaluated.');
+    return;
   }
 
   if (poolSqrt === 0n) {
@@ -653,14 +797,7 @@ async function tick() {
   // `createReserveOfferWithMode` would revert with OfferAlreadyActive.
   // Use the rebalance path, which atomically cancels-then-posts.
   let onchainExpired = false;
-  if (active) {
-    const onchainOffer = await publicClient.readContract({
-      address: HOOK,
-      abi: hookAbi,
-      functionName: 'getOffer',
-      args: [poolKey],
-    });
-    const nowSec = BigInt(Math.floor(Date.now() / 1000));
+  if (active && onchainOffer) {
     // Match the hook's own check (`block.timestamp > o.expiry`) exactly,
     // so we don't rebalance one second before the hook would consider the
     // offer expired.
