@@ -19,6 +19,11 @@ export const vaultAbi = [
   { type: 'function', name: 'decimals', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint8' }] },
   { type: 'function', name: 'convertToAssets', stateMutability: 'view', inputs: [{ type: 'uint256' }], outputs: [{ type: 'uint256' }] },
   { type: 'function', name: 'convertToShares', stateMutability: 'view', inputs: [{ type: 'uint256' }], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'totalDepositors', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'assetsDeployed', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'totalYieldCollected', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'navReferenceSqrtPriceX96', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint160' }] },
+  { type: 'function', name: 'maxNavDeviationBps', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
   { type: 'function', name: 'previewDeposit', stateMutability: 'view', inputs: [{ type: 'uint256' }], outputs: [{ type: 'uint256' }] },
   { type: 'function', name: 'previewRedeem', stateMutability: 'view', inputs: [{ type: 'uint256' }], outputs: [{ type: 'uint256' }] },
   { type: 'function', name: 'deposit', stateMutability: 'nonpayable', inputs: [{ type: 'uint256' }, { type: 'address' }], outputs: [{ type: 'uint256' }] },
@@ -61,6 +66,7 @@ export const vaultAbi = [
   { type: 'function', name: 'tickUpper', stateMutability: 'view', inputs: [], outputs: [{ type: 'int24' }] },
   { type: 'function', name: 'maxTVL', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
   { type: 'function', name: 'performanceFeeBps', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'refreshNavReference', stateMutability: 'nonpayable', inputs: [], outputs: [] },
   { type: 'function', name: 'paused', stateMutability: 'view', inputs: [], outputs: [{ type: 'bool' }] },
   { type: 'function', name: 'owner', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
   // Owner-only reserve-desk writes
@@ -99,11 +105,19 @@ export const vaultAbi = [
     { name: 'tickSpacing', type: 'int24' },
     { name: 'hooks', type: 'address' },
   ] }] },
+  { type: 'error', name: 'NAV_PRICE_DEVIATION', inputs: [] },
 ] as const satisfies Abi;
 
 export const vaultOwnerControllerAbi = [
   { type: 'function', name: 'owner', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
   { type: 'function', name: 'vault', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+  {
+    type: 'function',
+    name: 'executeVaultOwnerCall',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'data', type: 'bytes' }],
+    outputs: [{ type: 'bytes' }],
+  },
   {
     type: 'function',
     name: 'reserveKeepers',
@@ -142,6 +156,7 @@ export const vaultOwnerControllerAbi = [
 
 // VaultLens — V2.1 split moved aggregate views off the vault into a stateless lens.
 export const lensAbi = [
+  { type: 'error', name: 'NAV_PRICE_DEVIATION', inputs: [] },
   {
     type: 'function',
     name: 'getVaultStats',

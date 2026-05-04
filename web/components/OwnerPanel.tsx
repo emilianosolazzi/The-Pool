@@ -35,6 +35,7 @@ import {
   useWriteContract,
 } from 'wagmi';
 import {
+  encodeFunctionData,
   parseUnits,
   type Address,
   type Abi,
@@ -370,6 +371,13 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
     !isPending &&
     !isMining;
 
+  const canRefreshNav =
+    onCorrectChain &&
+    !isPending &&
+    !isMining &&
+    Boolean(vault) &&
+    (isDirectOwner || isControllerOwner);
+
   const expiryUnix = (): bigint => {
     const mins = Math.max(1, Math.floor(expiryMin));
     return BigInt(Math.floor(Date.now() / 1000) + mins * 60);
@@ -407,6 +415,33 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
       abi: writeAbi,
       functionName: 'collectReserveProceeds',
       args: [currency],
+      chainId,
+    });
+  };
+
+  const refreshNavReference = () => {
+    reset();
+    if (controllerMode) {
+      if (!controller || !isControllerOwner) return;
+      const data = encodeFunctionData({
+        abi: vaultAbi,
+        functionName: 'refreshNavReference',
+      });
+      writeContract({
+        address: controller,
+        abi: vaultOwnerControllerAbi,
+        functionName: 'executeVaultOwnerCall',
+        args: [data],
+        chainId,
+      });
+      return;
+    }
+
+    if (!vault || !isDirectOwner) return;
+    writeContract({
+      address: vault,
+      abi: vaultAbi,
+      functionName: 'refreshNavReference',
       chainId,
     });
   };
@@ -672,6 +707,25 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
 
           {/* ── Right column: proceeds + summary ─────────────────────── */}
           <div className="space-y-4">
+            {(isDirectOwner || isControllerOwner) && (
+              <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-5">
+                <div className="text-sm font-semibold text-zinc-100">Vault NAV reference</div>
+                <p className="mt-1 text-xs text-zinc-400">
+                  Re-anchor NAV pricing to the current pool spot after a legitimate
+                  market move. This clears the NAV guard for TVL, share price,
+                  deposits, and withdrawals.
+                </p>
+                <button
+                  type="button"
+                  className="btn-ghost mt-4 text-xs"
+                  onClick={refreshNavReference}
+                  disabled={!canRefreshNav}
+                >
+                  Refresh NAV reference
+                </button>
+              </div>
+            )}
+
             <div className="rounded-xl border border-white/10 bg-black/20 p-5">
               <div className="text-sm font-semibold text-zinc-100">Unclaimed proceeds</div>
               <div className="mt-1 text-xs text-zinc-500">
