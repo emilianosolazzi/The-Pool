@@ -66,8 +66,11 @@ VAULT_LENS=0x12e86890b75fdee22a35be66550373936d883551
 HOOK=0x486579DE6391053Df88a073CeBd673dd545200cC
 KEEPER_WRITE_TARGET=0xa0e1580CAe87027D023E9dE94899346BFA383724
 ARBITRUM_RPC_URL=https://arb1.arbitrum.io/rpc
-KEEPER_PRIVATE_KEY=0x...   # controller owner or reserve keeper
-DRY_RUN=true               # flip to false only after first sanity tick
+KEEPER_PRIVATE_KEY=0x...   # required for writes; vault owner, or allowlisted controller keeper
+DRY_RUN=true               # simulate writes; flip to false only after first sanity tick
+READ_ONLY=false            # true = real chain reads/metrics only, no private key or writes
+METRICS_HOST=127.0.0.1     # Prometheus scrape bind address
+METRICS_PORT=9464          # use 0 to disable /metrics
 ```
 
 ## History
