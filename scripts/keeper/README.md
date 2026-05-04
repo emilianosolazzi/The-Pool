@@ -132,6 +132,71 @@ sudo systemctl enable --now prometheus
 curl http://127.0.0.1:9090/api/v1/targets
 ```
 
+## Grafana dashboard (no Docker)
+
+Grafana reads the keeper through Prometheus: keeper `/metrics` →
+Prometheus `the-pool-keeper` scrape job → Grafana datasource/dashboard.
+The repo includes provisioning files under [`grafana`](./grafana) so a
+fresh Grafana instance starts with the Prometheus datasource and keeper
+dashboard already connected.
+
+Install Grafana from the official apt repository on the VM (no Docker):
+
+```bash
+sudo apt-get update
+sudo apt-get install -y apt-transport-https software-properties-common wget gpg
+sudo mkdir -p /etc/apt/keyrings
+wget -q -O - https://apt.grafana.com/gpg.key | gpg --dearmor | \
+   sudo tee /etc/apt/keyrings/grafana.gpg >/dev/null
+echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main" | \
+   sudo tee /etc/apt/sources.list.d/grafana.list
+sudo apt-get update
+sudo apt-get install -y grafana
+```
+
+Copy the provisioning files:
+
+```bash
+sudo mkdir -p \
+   /etc/grafana/provisioning/datasources \
+   /etc/grafana/provisioning/dashboards \
+   /var/lib/grafana/dashboards/the-pool
+
+sudo cp grafana/provisioning/datasources/prometheus.yml \
+   /etc/grafana/provisioning/datasources/the-pool-prometheus.yml
+sudo cp grafana/provisioning/dashboards/the-pool-keeper.yml \
+   /etc/grafana/provisioning/dashboards/the-pool-keeper.yml
+sudo cp grafana/dashboards/the-pool-keeper.json \
+   /var/lib/grafana/dashboards/the-pool/the-pool-keeper.json
+sudo chown -R grafana:grafana /var/lib/grafana/dashboards
+```
+
+Bind Grafana to localhost and verify it is healthy:
+
+```bash
+sudo mkdir -p /etc/systemd/system/grafana-server.service.d
+cat <<'EOF' | sudo tee /etc/systemd/system/grafana-server.service.d/override.conf >/dev/null
+[Service]
+Environment=GF_SERVER_HTTP_ADDR=127.0.0.1
+Environment=GF_SERVER_HTTP_PORT=3000
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now grafana-server
+curl http://127.0.0.1:3000/api/health
+```
+
+Open the UI through an SSH tunnel instead of exposing port 3000:
+
+```bash
+ssh -L 3000:127.0.0.1:3000 <user>@<keeper-vm>
+```
+
+Then visit `http://127.0.0.1:3000/d/the-pool-keeper/the-pool-keeper`.
+The default local datasource URL is `http://127.0.0.1:9090`; change
+[`grafana/provisioning/datasources/prometheus.yml`](./grafana/provisioning/datasources/prometheus.yml)
+if Prometheus runs elsewhere.
+
 ## What it does each tick
 
 1. Verifies the keeper key is the vault `owner()`.
