@@ -1,11 +1,12 @@
 'use client';
 
 /**
- * OwnerPanel — owner-only reserve-desk control surface.
+ * OwnerPanel — reserve-desk control surface.
  *
- * Renders ONLY when the connected wallet equals `vault.owner()`. Anyone else
- * sees nothing. Exposes the three on-chain operations the owner currently runs
- * via `cast`:
+ * Direct-vault mode renders when the connected wallet equals `vault.owner()`.
+ * Controller mode renders when the vault owner is `VaultOwnerController` and
+ * the connected wallet is either the controller owner or an allowlisted
+ * reserve keeper. Exposes the three on-chain operations the desk runs:
  *
  *   • Post / refresh offer (rebalanceOfferWithMode)   — atomic cancel+claim+post
  *   • Cancel active offer  (cancelReserveOffer)
@@ -19,7 +20,7 @@
  *   - Tx state banners + Arbiscan link on confirmation.
  *
  * Security:
- *   - Hard gate on owner check (read straight from chain, refetched).
+ *   - Hard gate on owner / reserve-keeper check (read straight from chain).
  *   - All writes go through wagmi's `useWriteContract`; signature happens in
  *     the connected wallet (Ledger via WalletConnect, MetaMask, etc.).
  */
@@ -35,11 +36,11 @@ import {
 } from 'wagmi';
 import {
   parseUnits,
-  isAddress,
   type Address,
+  type Abi,
   type Hex,
 } from 'viem';
-import { erc20Abi, vaultAbi, hookAbi } from '@/lib/abis';
+import { erc20Abi, vaultAbi, hookAbi, vaultOwnerControllerAbi } from '@/lib/abis';
 import {
   fmtBps,
   fmtPrice,
@@ -77,6 +78,13 @@ const DEFAULT_EXPIRY_MIN = 30;
 
 const Q96 = 2n ** 96n;
 
+function sameAddress(
+  a: Address | string | null | undefined,
+  b: Address | string | null | undefined,
+): boolean {
+  return Boolean(a && b && a.toLowerCase() === b.toLowerCase());
+}
+
 /**
  * Apply a spread in bps to a sqrtPriceX96.
  *
@@ -101,14 +109,16 @@ function applySqrtSpread(
 
 export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
   const vault = deployment.vault as Address | undefined;
+  const controller = deployment.controller as Address | undefined;
   const hook = deployment.hook as Address | undefined;
   const enabled = Boolean(vault && hook);
+  const controllerConfigured = Boolean(controller);
 
   const { address: wallet, isConnected } = useAccount();
   const connectedChain = useChainId();
   const onCorrectChain = connectedChain === chainId;
 
-  // ── Owner gate ──────────────────────────────────────────────────────────
+  // ── Operator gate ───────────────────────────────────────────────────────
   const { data: ownerAddr } = useReadContract({
     address: vault,
     abi: vaultAbi,
@@ -117,12 +127,58 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
     query: { enabled, staleTime: 30_000 },
   });
 
-  const isOwner =
+  const { data: controllerVault } = useReadContract({
+    address: controller,
+    abi: vaultOwnerControllerAbi,
+    functionName: 'vault',
+    chainId,
+    query: { enabled: enabled && controllerConfigured, staleTime: 30_000 },
+  });
+
+  const { data: controllerOwner } = useReadContract({
+    address: controller,
+    abi: vaultOwnerControllerAbi,
+    functionName: 'owner',
+    chainId,
+    query: { enabled: enabled && controllerConfigured, staleTime: 30_000 },
+  });
+
+  const { data: keeperAllowed } = useReadContract({
+    address: controller,
+    abi: vaultOwnerControllerAbi,
+    functionName: 'reserveKeepers',
+    args: wallet ? [wallet] : undefined,
+    chainId,
+    query: {
+      enabled: enabled && controllerConfigured && isConnected && Boolean(wallet),
+      staleTime: 15_000,
+    },
+  });
+
+  const isDirectOwner =
     enabled &&
     isConnected &&
-    ownerAddr &&
-    wallet &&
-    (wallet as string).toLowerCase() === (ownerAddr as string).toLowerCase();
+    sameAddress(wallet, ownerAddr as Address | undefined);
+
+  const vaultOwnedByController =
+    enabled && controllerConfigured && sameAddress(ownerAddr as Address | undefined, controller);
+  const controllerMatchesVault =
+    enabled && controllerConfigured && sameAddress(controllerVault as Address | undefined, vault);
+  const controllerMode = Boolean(vaultOwnedByController && controllerMatchesVault);
+  const isControllerOwner =
+    controllerMode && Boolean(controllerOwner) && sameAddress(wallet, controllerOwner as Address | undefined);
+  const isReserveKeeper = controllerMode && keeperAllowed === true;
+  const canOperate = controllerMode
+    ? Boolean(isControllerOwner || isReserveKeeper)
+    : Boolean(isDirectOwner);
+  const writeTarget = (controllerMode ? controller : vault) as Address | undefined;
+  const writeAbi = (controllerMode ? vaultOwnerControllerAbi : vaultAbi) as Abi;
+  const operatorRole = controllerMode
+    ? isControllerOwner
+      ? 'controller owner'
+      : 'reserve keeper'
+    : 'vault owner';
+  const writeTargetName = controllerMode ? 'controller' : 'vault';
 
   // ── Pool key + token metadata (always read so panel can render preview) ──
   const { data: poolKey } = useReadContract({
@@ -303,8 +359,9 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
     sizeUnits > sellVaultBalance;
 
   const canPost =
-    isOwner &&
+    canOperate &&
     onCorrectChain &&
+    !!writeTarget &&
     !!sellCurrency &&
     !!sizeUnits &&
     sizeUnits > 0n &&
@@ -319,11 +376,11 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
   };
 
   const post = () => {
-    if (!vault || !sellCurrency || !sizeUnits || !vaultSqrt) return;
+    if (!writeTarget || !sellCurrency || !sizeUnits || !vaultSqrt) return;
     reset();
     writeContract({
-      address: vault,
-      abi: vaultAbi,
+      address: writeTarget,
+      abi: writeAbi,
       functionName: 'rebalanceOfferWithMode',
       args: [sellCurrency, sizeUnits, vaultSqrt, expiryUnix(), mode],
       chainId,
@@ -331,11 +388,11 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
   };
 
   const cancel = () => {
-    if (!vault || !sellCurrency) return;
+    if (!writeTarget || !sellCurrency) return;
     reset();
     writeContract({
-      address: vault,
-      abi: vaultAbi,
+      address: writeTarget,
+      abi: writeAbi,
       functionName: 'cancelReserveOffer',
       args: [sellCurrency],
       chainId,
@@ -343,11 +400,11 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
   };
 
   const collect = (currency: Address) => {
-    if (!vault) return;
+    if (!writeTarget) return;
     reset();
     writeContract({
-      address: vault,
-      abi: vaultAbi,
+      address: writeTarget,
+      abi: writeAbi,
       functionName: 'collectReserveProceeds',
       args: [currency],
       chainId,
@@ -355,11 +412,12 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
   };
 
   // ── Render gate ─────────────────────────────────────────────────────────
-  // Hidden entirely for non-owners. No flicker on initial load: we wait for
-  // ownerAddr to resolve before deciding.
+  // Hidden entirely for non-operators. No flicker on initial load: we wait for
+  // owner/controller reads before deciding.
   if (!enabled) return null;
   if (!ownerAddr) return null;
-  if (!isOwner) return null;
+  if (vaultOwnedByController && !controllerVault) return null;
+  if (!canOperate) return null;
 
   // ── Render ──────────────────────────────────────────────────────────────
   return (
@@ -367,13 +425,14 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
       <div className="card border-accent-500/30 bg-gradient-to-br from-accent-500/5 to-iris-500/5 p-6">
         <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
           <div>
-            <div className="external-badge mb-2">Owner controls</div>
+            <div className="external-badge mb-2">Reserve controls</div>
             <h2 className="text-xl font-semibold tracking-tight md:text-2xl">
               Reserve desk · operator panel
             </h2>
             <p className="mt-1 max-w-2xl text-sm text-zinc-400">
-              Connected as the vault owner. All writes go straight to{' '}
-              <span className="font-mono">{shortAddress(vault)}</span>. Each
+              Connected as {operatorRole}. All writes go straight to the{' '}
+              {writeTargetName}{' '}
+              <span className="font-mono">{shortAddress(writeTarget)}</span>. Each
               action is signed by your wallet on chain {chainId}.
             </p>
           </div>
@@ -584,7 +643,7 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
                 type="button"
                 className="btn-ghost"
                 onClick={cancel}
-                disabled={!offer?.active || isPending || isMining || !onCorrectChain}
+                disabled={!canOperate || !writeTarget || !offer?.active || isPending || isMining || !onCorrectChain}
               >
                 Cancel active offer
               </button>
@@ -625,14 +684,14 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
                   amount={proceeds0}
                   decimals={decimals0}
                   onClick={() => poolKey && collect(poolKey.currency0)}
-                  disabled={!poolKey || (proceeds0 ?? 0n) === 0n || isPending || isMining || !onCorrectChain}
+                  disabled={!canOperate || !writeTarget || !poolKey || (proceeds0 ?? 0n) === 0n || isPending || isMining || !onCorrectChain}
                 />
                 <ProceedsRow
                   label={symbol1}
                   amount={proceeds1}
                   decimals={decimals1}
                   onClick={() => poolKey && collect(poolKey.currency1)}
-                  disabled={!poolKey || (proceeds1 ?? 0n) === 0n || isPending || isMining || !onCorrectChain}
+                  disabled={!canOperate || !writeTarget || !poolKey || (proceeds1 ?? 0n) === 0n || isPending || isMining || !onCorrectChain}
                 />
               </div>
             </div>
@@ -641,8 +700,8 @@ export function OwnerPanel({ deployment, chainId, explorerBase }: Props) {
               <div className="mb-1 font-semibold text-zinc-100">How this works</div>
               <p>
                 Posting writes <span className="font-mono">rebalanceOfferWithMode</span>{' '}
-                on the vault. Existing offers are cancelled, both proceeds
-                claimed, and a fresh offer posted in one transaction. Anyone
+                on the {writeTargetName}. Existing offers are cancelled, both
+                proceeds claimed, and a fresh offer posted in one transaction. Anyone
                 swapping through the pool fills the offer automatically — no
                 taker-side action.
               </p>

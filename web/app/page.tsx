@@ -1,7 +1,7 @@
 'use client';
 
 import { useChainId } from 'wagmi';
-import { arbitrum, arbitrumSepolia } from 'wagmi/chains';
+import { arbitrumSepolia } from 'wagmi/chains';
 import { Nav } from '@/components/Nav';
 import { Hero } from '@/components/Hero';
 import { PlainEnglish } from '@/components/PlainEnglish';
@@ -13,14 +13,11 @@ import { HowItWorks } from '@/components/HowItWorks';
 import { Footer } from '@/components/Footer';
 import { ReserveStatus } from '@/components/ReserveStatus';
 import { OwnerPanel } from '@/components/OwnerPanel';
-import { DEFAULT_CHAIN_ID, getDeployment, type AppChainId } from '@/lib/deployments';
+import { getActiveDeploymentChainId, getDeployment } from '@/lib/deployments';
 
 export default function HomePage() {
   const chainId = useChainId();
-  const activeChainId: AppChainId =
-    chainId === arbitrum.id || chainId === arbitrumSepolia.id
-      ? chainId
-      : DEFAULT_CHAIN_ID;
+  const activeChainId = getActiveDeploymentChainId(chainId);
   const deployment = getDeployment(activeChainId);
   const explorerBase =
     activeChainId === arbitrumSepolia.id

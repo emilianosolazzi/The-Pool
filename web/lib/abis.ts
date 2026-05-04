@@ -101,6 +101,45 @@ export const vaultAbi = [
   ] }] },
 ] as const satisfies Abi;
 
+export const vaultOwnerControllerAbi = [
+  { type: 'function', name: 'owner', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+  { type: 'function', name: 'vault', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+  {
+    type: 'function',
+    name: 'reserveKeepers',
+    stateMutability: 'view',
+    inputs: [{ name: 'keeper', type: 'address' }],
+    outputs: [{ type: 'bool' }],
+  },
+  {
+    type: 'function',
+    name: 'rebalanceOfferWithMode',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'sellCurrency', type: 'address' },
+      { name: 'newSellAmount', type: 'uint128' },
+      { name: 'newSqrtPriceX96', type: 'uint160' },
+      { name: 'expiry', type: 'uint64' },
+      { name: 'mode', type: 'uint8' },
+    ],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'cancelReserveOffer',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'sellCurrency', type: 'address' }],
+    outputs: [{ name: 'returned', type: 'uint128' }],
+  },
+  {
+    type: 'function',
+    name: 'collectReserveProceeds',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'currency', type: 'address' }],
+    outputs: [{ name: 'amount', type: 'uint256' }],
+  },
+] as const satisfies Abi;
+
 // VaultLens — V2.1 split moved aggregate views off the vault into a stateless lens.
 export const lensAbi = [
   {

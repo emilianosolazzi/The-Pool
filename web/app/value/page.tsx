@@ -1,18 +1,15 @@
 'use client';
 
 import { useChainId } from 'wagmi';
-import { arbitrum, arbitrumSepolia } from 'wagmi/chains';
+import { arbitrumSepolia } from 'wagmi/chains';
 import { Nav } from '@/components/Nav';
 import { Footer } from '@/components/Footer';
-import { DEFAULT_CHAIN_ID, getDeployment, type AppChainId } from '@/lib/deployments';
+import { getActiveDeploymentChainId, getDeployment } from '@/lib/deployments';
 import { ValueCalculator } from '@/components/ValueCalculator';
 
 export default function ValuePage() {
   const chainId = useChainId();
-  const activeChainId: AppChainId =
-    chainId === arbitrum.id || chainId === arbitrumSepolia.id
-      ? chainId
-      : DEFAULT_CHAIN_ID;
+  const activeChainId = getActiveDeploymentChainId(chainId);
   const deployment = getDeployment(activeChainId);
 
   return (

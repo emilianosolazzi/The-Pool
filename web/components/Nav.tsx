@@ -4,17 +4,13 @@ import { ConnectButton } from '@rainbow-me/rainbowkit';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useChainId } from 'wagmi';
-import { arbitrum, arbitrumSepolia } from 'wagmi/chains';
-import { DEFAULT_CHAIN_ID, getDeployment, type AppChainId } from '@/lib/deployments';
+import { getActiveDeploymentChainId, getDeployment } from '@/lib/deployments';
 
 export function Nav() {
   const pathname = usePathname();
   const onHome = pathname === '/';
   const chainId = useChainId();
-  const activeChainId: AppChainId =
-    chainId === arbitrum.id || chainId === arbitrumSepolia.id
-      ? chainId
-      : DEFAULT_CHAIN_ID;
+  const activeChainId = getActiveDeploymentChainId(chainId);
   const deployment = getDeployment(activeChainId);
 
   const howHref = onHome ? '#how' : '/#how';
