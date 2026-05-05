@@ -124,8 +124,12 @@ export function ProofStrip({ deployment, chainId }: Props) {
     },
     {
       label: 'Hook fees routed',
-      value: feesRouted !== undefined ? `${fmtCompact(feesRouted, dec)} ${sym}` : undefined,
-      sub: 'Lifetime, on-chain',
+      // Note: totalFeesRouted aggregates the *output*-side delta of every hooked
+      // swap. On a WETH/USDC pool that mixes 6-dec USDC and 18-dec WETH into
+      // one uint256, so we deliberately do NOT label this with a currency.
+      // We render the raw 6-dec scaled value as a swap-activity proxy.
+      value: feesRouted !== undefined ? fmtCompact(feesRouted, dec) : undefined,
+      sub: 'Mixed-currency, lifetime',
       pulse: feesPulse,
     },
     {
@@ -150,39 +154,39 @@ export function ProofStrip({ deployment, chainId }: Props) {
       aria-label="Live on-chain proof"
       className="border-b border-white/5 bg-black/30 backdrop-blur-sm"
     >
-      <div className="mx-auto max-w-6xl px-4 py-6">
-        <div className="mb-3 flex items-center justify-between gap-3 text-xs uppercase tracking-widest text-zinc-500">
+      <div className="mx-auto max-w-6xl px-4 py-7 md:py-9">
+        <div className="mb-4 flex items-center justify-between gap-3 text-[11px] uppercase tracking-widest text-zinc-400 md:text-xs">
           <div className="flex items-center gap-2">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+            <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
             Live on-chain · Arbitrum One
           </div>
           {blockNumber !== undefined && (
-            <div className="hidden font-mono text-[10px] normal-case text-zinc-500 sm:block">
+            <div className="hidden font-mono text-[11px] normal-case text-zinc-500 sm:block">
               block {blockNumber.toString()}
             </div>
           )}
         </div>
-        <div className="grid grid-cols-3 gap-2 sm:gap-3 lg:grid-cols-6">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-6">
           {cells.map((c) => (
             <div
               key={c.label}
-              className={`relative rounded-xl border bg-white/[0.02] px-3 py-3 transition-colors duration-500 ${
+              className={`relative rounded-xl border bg-white/[0.02] px-4 py-4 transition-colors duration-500 md:px-5 md:py-5 ${
                 c.pulse
                   ? 'border-emerald-400/60 bg-emerald-400/[0.06]'
                   : 'border-white/10'
               }`}
             >
-              <div className="text-[10px] uppercase tracking-wider text-zinc-500">
+              <div className="text-[11px] uppercase tracking-wider text-zinc-400 md:text-xs">
                 {c.label}
               </div>
               {c.value !== undefined ? (
-                <div className="mt-1 truncate font-mono text-sm font-semibold text-white sm:text-base md:text-lg">
+                <div className="mt-2 truncate font-mono text-xl font-semibold text-white md:text-2xl lg:text-[1.625rem]">
                   {c.value}
                 </div>
               ) : (
-                <div className="mt-1 h-5 w-2/3 animate-pulse rounded bg-white/10 md:h-6" />
+                <div className="mt-2 h-7 w-2/3 animate-pulse rounded bg-white/10 md:h-8" />
               )}
-              <div className="mt-0.5 truncate text-[11px] text-zinc-500">{c.sub}</div>
+              <div className="mt-1 truncate text-xs text-zinc-500 md:text-sm">{c.sub}</div>
             </div>
           ))}
         </div>
