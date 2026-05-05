@@ -1,7 +1,7 @@
 import { ImageResponse } from 'next/og';
 
 export const runtime = 'edge';
-export const alt = 'The Pool — USDC yield from real Uniswap v4 swaps';
+export const alt = 'The-Pool-Adaptive-Reserve-Hook — USDC yield from real Uniswap v4 swaps';
 export const size = { width: 1200, height: 630 };
 export const contentType = 'image/png';
 

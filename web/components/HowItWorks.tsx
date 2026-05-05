@@ -16,7 +16,7 @@ const steps = [
   {
     n: '03',
     title: 'Share price accrues',
-    body: 'Per donation event, v4 credits each LP L_i / Σ L_k, summed over every position on this exact PoolId whose tick range covers the active tick at that block — a snapshot, not a TWAP. Liquidity-time-weighting emerges from the sequence of donations. Share price = totalAssets()/totalSupply() is a step function: continuous in spot between flushes, with upward jumps when collectYield() (permissionless) or any deposit/withdraw imports latent v4 fee growth (a deterministic on-chain receivable kept outside totalAssets() to keep the realized side tamper-evident).',
+    body: 'Per donation event, v4 credits each LP L_i / L(t_d), where L(t_d) is the active liquidity scalar on this exact PoolId (a snapshot, not a TWAP, not a global v4 sum). Yield is time-integrated exposure to those events, not a count of them. Share price = totalAssets()/totalSupply(); this vault uses discrete harvest — an implementation choice that excludes uncollected v4 fees from totalAssets() and imports them step-wise via collectYield() (permissionless) or any deposit/withdraw flush.',
   },
   {
     n: '04',

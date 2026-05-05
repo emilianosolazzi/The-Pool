@@ -3,11 +3,11 @@ export function Footer() {
     <footer className="border-t border-white/5 py-10">
       <div className="mx-auto flex max-w-6xl flex-col items-center gap-3 px-4 text-sm text-zinc-500 md:flex-row md:justify-between">
         <div>
-          © {new Date().getFullYear()} The Pool. MIT-licensed.
+          © {new Date().getFullYear()} The-Pool-Adaptive-Reserve-Hook. MIT-licensed.
         </div>
         <div className="flex items-center gap-5">
           <a
-            href="https://github.com/emilianosolazzi/The-Pool"
+            href="https://github.com/emilianosolazzi/The-Pool-Adaptive-Reserve-Hook"
             target="_blank"
             rel="noopener noreferrer"
             className="hover:text-white"
@@ -15,7 +15,7 @@ export function Footer() {
             GitHub
           </a>
           <a
-            href="https://github.com/emilianosolazzi/The-Pool/blob/main/docs/ARCHITECTURE.md"
+            href="https://github.com/emilianosolazzi/The-Pool-Adaptive-Reserve-Hook/blob/main/docs/ARCHITECTURE.md"
             target="_blank"
             rel="noopener noreferrer"
             className="hover:text-white"

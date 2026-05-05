@@ -11,7 +11,7 @@ const arbitrumSepoliaRpcUrl =
   process.env.NEXT_PUBLIC_ARBITRUM_SEPOLIA_RPC_URL || 'https://sepolia-rollup.arbitrum.io/rpc';
 
 export const wagmiConfig = getDefaultConfig({
-  appName: 'The Pool',
+  appName: 'The-Pool-Adaptive-Reserve-Hook',
   projectId,
   chains: [arbitrum, arbitrumSepolia],
   transports: {

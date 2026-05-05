@@ -1,4 +1,4 @@
-# The Pool V2.1 — Protocol Specification
+# The-Pool-Adaptive-Reserve-Hook V2.1 — Protocol Specification
 
 **Status**: production, Arbitrum One.
 **Audience**: auditors, integrators, sophisticated LPs.
@@ -8,6 +8,20 @@ contracts disagree, the contracts win — please file an issue.
 This spec is the complement to [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). The
 architecture document is descriptive; this one is prescriptive: subsystem
 boundaries, state machines, equations, and invariants.
+
+## 0. Reading guide — separation of layers
+
+Claims in this document live in exactly one of three layers. Mixing
+them is the most common reading error.
+
+| Layer | What is true here | Where to verify |
+|---|---|---|
+| **(P) Uniswap v4 protocol** | Invariants of v4 itself: `donate()`, `feeGrowthInside`, per-tick `liquidityNet`, active-liquidity scalar $L$. | `lib/v4-core` |
+| **(I) This implementation** | Choices made by *our* contracts: what `totalAssets()` includes, when `_collectYield()` runs, NAV deviation guard, reserve-fill gate. | `src/LiquidityVaultV2.sol`, `src/DynamicFeeHookV2.sol`, `src/FeeDistributor.sol` |
+| **(N) Narrative / UI** | Plain-English restatements for product surfaces. Always informal. | `web/components/*` |
+
+Every numbered claim below is tagged **(P)**, **(I)**, or **(N)**. A
+claim's truth value should never be inherited across layers.
 
 ## 1. Subsystem boundaries
 
@@ -49,7 +63,7 @@ Let:
   $[\sqrt{P_\text{tickLower}}, \sqrt{P_\text{tickUpper}}]$.
 - $Q(x, P)$ = quote of $x$ other-token units in asset units at price $P$.
 
-### 2.2 Equation
+### 2.2 Equation **(I)**
 
 $$
 \text{totalAssets}() = A_\text{idle} + A_\text{pending} + A_\text{escrow}
@@ -60,10 +74,24 @@ Live LP amounts use $P_\text{spot}$. Idle / pending / escrow other-token
 balances use $P_\text{clamp}$. This pins out-of-range inventory to the
 range edge so it cannot be over- or under-valued by spot drift.
 
-**Uncollected LP fees are NOT in `totalAssets()`.** Uniswap v4 fee growth
-on a position is realized only when `IPositionManager.collect` runs.
-Until then, those fees are economically owed to the position but live
-outside `totalAssets()`. Share price advances *step-wise* on every flush.
+**Implementation note (I): uncollected v4 fees are intentionally
+excluded from `totalAssets()`.** This is a *choice* of this vault, not
+a property of ERC-4626 or Uniswap v4. ERC-4626 leaves `totalAssets()`
+implementation-defined; some vaults pre-include claimable fees
+("continuous harvest"), others post-include only realized fees
+("discrete harvest"). Our `LiquidityVaultV2.totalAssets()` (see
+[`src/LiquidityVaultV2.sol`](../src/LiquidityVaultV2.sol)) values the v4
+position by liquidity amount only; uncollected `feeGrowthInside`
+growth is realized only when `IPositionManager.collect` is invoked
+through `_collectYield()`. We chose discrete harvest because it keeps
+`totalAssets()` evaluable without trusting an off-position view that
+can be perturbed by flash-minted positions in the same block. Any
+integer reader can re-compute NAV from public state without
+impersonating v4's per-position view.
+
+A different vault wrapping the same v4 hook could choose continuous
+harvest and still satisfy ERC-4626; that is why this fact is **(I)**
+rather than a global invariant.
 
 ### 2.3 Flush points
 
@@ -123,7 +151,12 @@ keep the realized side tamper-evident (no off-chain oracle, no v4 view
 that could be manipulated by a flash position), not because the claim
 is uncertain.
 
-#### 2.4.2 Temporal model (RCLL step function)
+#### 2.4.2 Temporal model **(I)** — RCLL step function
+
+The step-function shape of share price is a consequence of the
+discrete-harvest choice in §2.2. Other implementations of the same
+strategy on a different vault could produce a continuous share price
+signal; this is not a general property of ERC-4626 or v4 hooks.
 
 Let $\mathcal{F}$ = set of flush blocks (any block where
 `_collectYield()` or `_pullReserveProceedsBoth()` runs successfully).
@@ -148,10 +181,10 @@ force $b^* = \text{block.number}$ by calling permissionless
 `collectYield()`; the latency between latent accrual and realized
 recognition is therefore bounded by the caller's gas, not by trust.
 
-*UI implication:* dashboards should treat the displayed share price as
-the RCLL value, not as a smooth continuous signal. Headline yield
-figures must be either (a) post-flush, or (b) explicitly labeled
-"realized only—excludes uncollected LP fees."
+*UI implication **(N)**:* dashboards should treat the displayed share
+price as the RCLL value, not as a smooth continuous signal. Headline
+yield figures must be either (a) post-flush, or (b) explicitly labeled
+"realized only — excludes uncollected LP fees."
 
 ## 3. Hook execution (Execution layer)
 
@@ -203,9 +236,25 @@ PoolManager's perspective this is a one-tick fee-growth credit.
 specify the resulting LP credit by collapsing snapshot, scope, and
 time-emergence into one expression.
 
-#### 3.3.1 Scope of $\Sigma L$ (operational definition)
+#### 3.3.1 Denominator semantics **(P)**
 
-The scope of summation is **strictly the canonical PoolKey**
+v4 maintains an **active liquidity scalar** $L(t)$ per pool: the running
+sum of `liquidityNet` for all ticks crossed up to the current tick,
+equivalently the net liquidity contributed by every position whose tick
+range covers the active tick. When `donate()` is called, v4 credits the
+donation against $L(t_d)$ and accrues each position's pro-rata share via
+`feeGrowthInside`. We write the denominator either way:
+
+$$
+L(t_d) \;=\; \sum_{k \in \mathcal{S}(t_d)} L_k^{(t_d)}
+$$
+
+The two forms are mathematically equal; the scalar is the on-chain
+ground truth (`Pool.State.liquidity` on this `PoolId`). The set
+$\mathcal{S}(t_d)$ below is the *position-side* view of the same
+quantity.
+
+**Scope is strictly the canonical PoolKey:**
 
 $$
 \text{poolKey} := (\text{currency0}, \text{currency1}, \text{fee}, \text{tickSpacing}, \text{hooks})
@@ -213,39 +262,33 @@ $$
 
 deployed at
 [`DEPLOYED_ADDRESSES.md`](DEPLOYED_ADDRESSES.md), identified by its
-`PoolId = keccak256(abi.encode(poolKey))`. Specifically:
+`PoolId = keccak256(abi.encode(poolKey))`.
 
 - **Included:** every position $j$ minted via
   `IPositionManager.modifyLiquidities` against this exact `poolKey`
-  whose tick range covers the active tick at the donation block.
-- **Excluded:** positions on any other Uniswap v4 pool (different
-  fee tier, different tickSpacing, different hooks address, or
-  different currency pair), all Uniswap v3 positions, all
-  external-AMM positions.
+  whose tick range covers the active tick at $t_d$.
+- **Excluded:** positions on any other Uniswap v4 pool (different fee
+  tier, tickSpacing, hooks address, or currency pair); all Uniswap v3
+  positions; all external-AMM positions.
 
-This is enumerable on-chain via v4's `Pool.State` for this `PoolId`;
-v4's `feeGrowthGlobal` and per-tick `feeGrowthOutside` deterministically
-partition any donation across exactly this set. There is no need to
-enumerate global v4 state; the partition is local to `PoolId`.
+The denominator is therefore *active liquidity density at $\tau_{t_d}$
+on this PoolId*, not a raw enumeration of LP positions and not a global
+v4 sum.
 
-#### 3.3.2 Temporal discretization
+#### 3.3.2 Temporal discretization **(P)**
 
 The atomic unit of LP reward accounting is the **donation event**, one
 per `FeeDistributor.distribute()` call (typically one per hooked swap).
 Let $d \in \mathbb{N}$ index donation events globally on this `PoolId`,
 and let $t_d$ = `block.number` at which donation $d$ is included.
-
 Liquidity is sampled **at $t_d$**, not over a window: $L_j^{(t_d)}$ is
-position $j$'s $L$ value as written into v4's pool state at the start
-of the transaction that calls `donate()`. Positions minted, increased,
-decreased, or burned earlier in the same block are reflected; positions
-from later transactions are not.
+position $j$'s $L$ value as written into v4's pool state at the moment
+`donate()` executes. Positions minted, increased, decreased, or burned
+earlier in the same block are reflected; later transactions are not.
+Multiple donations in the same block are distinct $d$'s with the same
+$t_d$ but distinct intra-block sequencing.
 
-Multiple donations in the same block (back-to-back swaps) are distinct
-$d$'s with the same $t_d$ but different intra-block sequencing; v4
-applies them to the running pool state in order.
-
-#### 3.3.3 Reward function
+#### 3.3.3 Reward function **(P)**
 
 Define the snapshot in-range set
 
@@ -253,41 +296,37 @@ $$
 \mathcal{S}(t_d) := \{\,j \;\mid\; j \text{ is on this PoolId} \,\wedge\, \text{tickLower}_j \le \tau_{t_d} < \text{tickUpper}_j\,\}
 $$
 
-where $\tau_{t_d}$ is the pool's active tick at donation. Then for any
-position $i \in \mathcal{S}(t_d)$:
+For any position $i \in \mathcal{S}(t_d)$:
 
 $$
 \boxed{\;
-\text{credit}_i \;=\; \sum_{d \,:\, i \in \mathcal{S}(t_d)} f_\text{LP}(d) \cdot \frac{L_i^{(t_d)}}{\displaystyle\sum_{k \in \mathcal{S}(t_d)} L_k^{(t_d)}}
+\text{credit}_i \;=\; \sum_{d \,:\, i \in \mathcal{S}(t_d)} f_\text{LP}(d) \cdot \frac{L_i^{(t_d)}}{L(t_d)}
 \;}
 $$
 
-This is the **only** LP reward function in the protocol. Its three
-properties:
+This is the **only** LP reward function in the protocol — it is the
+direct specialization of v4's `feeGrowthInside` accounting to the
+donation case. Three properties:
 
-1. **Per-event snapshot:** the inner ratio is block-instantaneous; no
+1. **Per-event snapshot.** The inner ratio is block-instantaneous; no
    per-position duration accumulator exists in any contract.
-2. **Sequence-induced time weighting:** LPs that hold $L$ in range
-   across more $d$'s earn more, because each $d$ contributes
-   independently to the sum. "Liquidity-time" is not a separate
-   variable; it is the count of donation events in which the position
-   is a member of $\mathcal{S}$.
-3. **Forward-only dilution:** a position minted at $t > t_d$ has $L_i
-   ^{(t_d)} = 0$ and contributes nothing to that donation's denominator
-   either; it can only enter the sum for donations $d'$ with $t_{d'}
-   \ge t$.
+2. **Event-weighted exposure (not count).** Yield is the sum of
+   $L_i^{(t_d)} \cdot f_\text{LP}(d) / L(t_d)$ over donation events the
+   position is in-range for. A single large $f_\text{LP}(d)$ can
+   outweigh many small ones; "liquidity-time-weighting" colloquially
+   means *time-integrated exposure to discrete donation events*, not a
+   count of events.
+3. **Forward-only dilution.** A position minted at $t > t_d$ has
+   $L_i^{(t_d)} = 0$ and is absent from $\mathcal{S}(t_d)$ entirely; it
+   can only enter the sum for donations $d'$ with $t_{d'} \ge t$.
 
-This is the canonical form; sections elsewhere in the repo that name
-"$L_\text{vault}/\Sigma L_j$" are colloquial references to the inner
-ratio.
-
-> **Today-state vs invariant.** As of the deployment block, vault
-> liquidity is the only material position in $\mathcal{S}(\tau_\text{now})$
-> on this PoolId. That is a market state, not a protocol invariant.
-> The pool is permissionless; any third party can mint a Uniswap v4
+> **Today-state vs invariant (N).** As of the deployment block, vault
+> liquidity is the only material contributor to $L(\tau_\text{now})$ on
+> this PoolId. That is a market state, not a protocol invariant. The
+> pool is permissionless; any third party can mint a Uniswap v4
 > position whose tick range covers the active tick and immediately
-> enter $\mathcal{S}$ for all future donations. The vault has no power
-> to block this.
+> contribute to $L$ for all future donations. The vault has no
+> structural privilege over donation accrual.
 
 ### 3.4 Reserve-fill execution — invariants
 
@@ -350,22 +389,25 @@ keepers can re-quote without inspecting per-block reverts.
 `{UNCONFIGURED, PAUSED, IN_RANGE, OUT_OF_RANGE}`. **IN_RANGE means
 *eligible* to earn**, not *currently earning*.
 
-Fee accrual is fully specified by membership in $\mathcal{S}(t_d)$
-from §3.3 — there is no second condition. Restated against the vault
-position $\pi$ over a window $W$:
+Fee accrual **(P)** is fully specified by membership in
+$\mathcal{S}(t_d)$ from §3.3:
 
 $$
 \text{accruing}_\pi(W) \iff \exists\, d \;\text{s.t.}\; t_d \in W \,\wedge\, \pi \in \mathcal{S}(t_d) \,\wedge\, f_\text{LP}(d) > 0
 $$
 
-Unpacked: a donation event must occur, the vault's tick range must cover
-the active tick at that event, and the LP-side fee must be positive.
-This is the structural condition ("liquidity covers active tick"); the
-geometric phrase "spot inside vault range" is an equivalent informal
-restatement because v4's active tick is determined by
-$P_\text{spot}$. Whether an individual swap *crosses* the band is
-irrelevant; v4 fee growth is generated by any in-range portion of the
-swap, not by tick crossings.
+Three conjuncts: (i) a donation event must occur in window $W$, (ii)
+the vault position $\pi$ must be a member of $\mathcal{S}$ at that
+event (its tick range covers the active tick), and (iii) the LP-side
+fee at that event is positive. v4 distributes the fee to the active
+liquidity at that moment; whether an individual swap *crosses* the
+band is irrelevant.
+
+The popular phrasing "fees only accrue when spot is inside the range"
+is a **(N)**-layer informal restatement of (ii) using the equivalence
+between "active tick lies in $[\text{tickLower}, \text{tickUpper})$"
+and "$P_\text{spot}$ lies in the range's price band." It is not a
+separate condition; do not treat it as one.
 
 Idle in-range periods earn zero — no $d$, no accrual.
 Concentrated-liquidity is a *conditional* flow asset.

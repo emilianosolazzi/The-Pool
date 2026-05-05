@@ -66,7 +66,7 @@ export function Hero({ pairSymbol }: { pairSymbol: string; swapUrl?: string }) {
           <a href="/value" className="btn-ghost">
             Calculate my yield
           </a>
-          <a href="https://github.com/emilianosolazzi/The-Pool/blob/main/docs/SPEC.md" target="_blank" rel="noopener noreferrer" className="btn-ghost">
+          <a href="https://github.com/emilianosolazzi/The-Pool-Adaptive-Reserve-Hook/blob/main/docs/SPEC.md" target="_blank" rel="noopener noreferrer" className="btn-ghost">
             Protocol spec ↗
           </a>
         </div>
@@ -74,7 +74,7 @@ export function Hero({ pairSymbol }: { pairSymbol: string; swapUrl?: string }) {
         {/* Compact risk row — replaces the long disclaimer paragraph */}
         <div className="mt-8 flex flex-wrap gap-2 text-xs">
           <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-amber-200">
-            Fees only accrue when the vault range covers the active tick during a hooked swap
+            Fees are distributed to in-range liquidity at each donation event
           </span>
           <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-amber-200">
             Concentrated-LP exposure includes IL vs USDC
@@ -86,7 +86,7 @@ export function Hero({ pairSymbol }: { pairSymbol: string; swapUrl?: string }) {
             Bonus capped: $25K/wallet · $10K/epoch
           </span>
           <a
-            href="https://github.com/emilianosolazzi/The-Pool/blob/main/docs/HOOK-RISK-RUNBOOK.md"
+            href="https://github.com/emilianosolazzi/The-Pool-Adaptive-Reserve-Hook/blob/main/docs/HOOK-RISK-RUNBOOK.md"
             target="_blank"
             rel="noopener noreferrer"
             className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-zinc-300 hover:border-white/20 hover:text-white"

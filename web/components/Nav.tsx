@@ -56,7 +56,7 @@ export function Nav() {
             </a>
           ) : null}
           <a
-            href="https://github.com/emilianosolazzi/The-Pool"
+            href="https://github.com/emilianosolazzi/The-Pool-Adaptive-Reserve-Hook"
             target="_blank"
             rel="noopener noreferrer"
             className="hover:text-white"

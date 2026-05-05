@@ -266,7 +266,7 @@ export function ReserveStatus({ deployment, chainId, explorerBase }: Props) {
             the inequality). A stale or mispriced quote cannot execute against
             the pool.{' '}
             <a
-              href="https://github.com/emilianosolazzi/The-Pool/blob/main/docs/SPEC.md#34-reserve-fill-execution--invariants"
+              href="https://github.com/emilianosolazzi/The-Pool-Adaptive-Reserve-Hook/blob/main/docs/SPEC.md#34-reserve-fill-execution--invariants"
               target="_blank"
               rel="noopener noreferrer"
               className="text-zinc-300 underline decoration-zinc-600 hover:decoration-zinc-300"

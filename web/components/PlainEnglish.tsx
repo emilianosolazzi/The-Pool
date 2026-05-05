@@ -56,19 +56,19 @@ export function PlainEnglish({ deployment }: { deployment: Deployment }) {
           By default <span className="text-white font-semibold">80%</span> of
           that fee is sent into{' '}
           <code className="rounded bg-white/5 px-1 font-mono">poolManager.donate()</code>.{' '}
-          The atomic accounting unit is the{' '}
+          The atomic unit is the{' '}
           <span className="text-white">donation event</span> (one per
           distribute call). Per event, v4 credits each position{' '}
-          <span className="font-mono text-white">L_i / Σ L_k</span>, where
-          the sum is over every LP on{' '}
-          <span className="text-zinc-300">this exact PoolId</span>{' '}
-          (currency pair + fee + tickSpacing + hooks address) whose tick
-          range covers the active tick at that block — a snapshot, not a
-          TWAP, and not a global v4 enumeration. Liquidity-time-weighting{' '}
-          <em>emerges</em> from the sequence of these events: an LP earns
-          in proportion to the number of donations it is in-range for. Late
-          LPs cannot retroactively dilute past donations; they do dilute
-          every future one in proportion to their{' '}
+          <span className="font-mono text-white">L_i / L(t_d)</span>, where{' '}
+          <span className="font-mono text-white">L(t_d)</span> is the
+          pool’s active liquidity scalar on{' '}
+          <span className="text-zinc-300">this exact PoolId</span>. Yield
+          is time-integrated exposure to those events, not a count of them:
+          one large fee at a moment of small{' '}
+          <span className="font-mono text-white">L</span> can outweigh many
+          small ones at high <span className="font-mono text-white">L</span>.
+          Late LPs cannot retroactively dilute past donations; they do dilute
+          future ones in proportion to their{' '}
           <span className="font-mono text-white">L</span>.{' '}
           <span className="text-zinc-400">
             (The other 20% funds the treasury. Treasury share is
@@ -85,22 +85,22 @@ export function PlainEnglish({ deployment }: { deployment: Deployment }) {
           the single accounting anchor:{' '}
           <code className="rounded bg-white/5 px-1 font-mono">totalAssets() / totalSupply()</code>.
           There is <span className="text-white">no per-user reward tracking</span>{' '}
-          — all attribution is share-based. NAV is strictly two-part:{' '}
-          <span className="text-white">realized</span> (in{' '}
-          <code className="rounded bg-white/5 px-1 font-mono">totalAssets()</code>)
-          and <span className="text-white">latent</span>{' '}
-          (Uniswap v4 fee growth on the vault’s position, a deterministic
-          on-chain receivable, intentionally excluded from{' '}
+          — all attribution is share-based.
+          ERC-4626 leaves{' '}
           <code className="rounded bg-white/5 px-1 font-mono">totalAssets()</code>{' '}
-          to keep the realized side tamper-evident). Share price is a{' '}
-          <span className="text-white">step function</span>: continuous in
-          spot between flushes (mark-to-market of the realized side), with
-          upward jumps at each flush block when{' '}
+          implementation-defined; <em>this</em> vault uses a{' '}
+          <span className="text-white">discrete-harvest</span> model:
+          uncollected v4 fee growth is excluded from{' '}
+          <code className="rounded bg-white/5 px-1 font-mono">totalAssets()</code>{' '}
+          and imported step-wise when{' '}
           <code className="rounded bg-white/5 px-1 font-mono">collectYield()</code>{' '}
           (permissionless) or any{' '}
           <code className="rounded bg-white/5 px-1 font-mono">deposit</code>/
           <code className="rounded bg-white/5 px-1 font-mono">withdraw</code>{' '}
-          imports the latent side. Between flushes, the displayed price is a
+          flushes — a choice that keeps the realized side tamper-evident,
+          not a v4-level invariant. As a consequence, share price is a
+          step function: continuous in spot between flushes, with upward
+          jumps at each flush. Between flushes, the displayed price is a
           lower bound on lifetime entitlement; anyone can call{' '}
           <code className="rounded bg-white/5 px-1 font-mono">collectYield()</code>{' '}
           first to trade against the post-flush price.
