@@ -34,7 +34,7 @@ type VaultStatsTuple = readonly [bigint, bigint, bigint, bigint, bigint, string]
 
 export function ValueCalculator({ deployment, chainId }: Props) {
   const [depositAmount, setDepositAmount] = useState('1000');
-  const [dailyVolumeUsd, setDailyVolumeUsd] = useState('100000000');
+  const [dailyVolumeUsd, setDailyVolumeUsd] = useState('1000000');
   const [volatilityHitRatePct, setVolatilityHitRatePct] = useState('20');
   const [vaultLiquiditySharePct, setVaultLiquiditySharePct] = useState('1');
   const [timeframe, setTimeframe] = useState<'1D' | '7D' | '30D' | '1Y'>('30D');
