@@ -28,19 +28,20 @@ export function Hero({ pairSymbol }: { pairSymbol: string; swapUrl?: string }) {
             <span className="text-zinc-400">— variable, uncapped.</span>{' '}
             Each hooked swap routes 80% of its fee into{' '}
             <code className="rounded bg-white/5 px-1 font-mono text-sm">poolManager.donate()</code>.
-            Per donation, v4 credits each in-range position{' '}
-            <span className="font-mono text-white">L_j / Σ L_k</span>{' '}
-            of the fee, where{' '}
-            <span className="font-mono text-white">Σ L_k</span>{' '}
-            is summed over every Uniswap v4 LP whose tick range covers the
-            active tick at that block. Liquidity-time-weighting is the
-            sequence of those snapshots — late LPs do not retroactively dilute
-            past donations, but they do dilute every future one in proportion
-            to their{' '}
+            Per donation event, v4 credits each position{' '}
+            <span className="font-mono text-white">L_i / Σ L_k</span>, where
+            the sum is over every position on{' '}
+            <span className="text-zinc-300">this exact PoolId</span>{' '}
+            (currency pair + fee + tickSpacing + hooks) whose tick range
+            covers the active tick at the donation block. Liquidity is
+            sampled per-event, not averaged; “liquidity-time” is the count
+            of donations a position is in-range for. Late LPs do not
+            retroactively dilute past donations, but they do dilute every
+            future one in proportion to their{' '}
             <span className="font-mono text-white">L</span>.{' '}
             <span className="text-zinc-400">
-              Vault liquidity is presently dominant in the active range — a
-              market state, not a protocol invariant.
+              Vault liquidity is presently dominant in this range — a market
+              state, not a protocol invariant.
             </span>
           </li>
           <li>
@@ -73,7 +74,7 @@ export function Hero({ pairSymbol }: { pairSymbol: string; swapUrl?: string }) {
         {/* Compact risk row — replaces the long disclaimer paragraph */}
         <div className="mt-8 flex flex-wrap gap-2 text-xs">
           <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-amber-200">
-            Fees only accrue while spot is inside the active range during a hooked swap
+            Fees only accrue when the vault range covers the active tick during a hooked swap
           </span>
           <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-amber-200">
             Concentrated-LP exposure includes IL vs USDC

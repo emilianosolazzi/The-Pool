@@ -16,7 +16,7 @@ const steps = [
   {
     n: '03',
     title: 'Share price accrues',
-    body: 'Per donation, v4 credits each in-range LP L_j / Σ L_k, where Σ L_k is summed over every Uniswap v4 position whose tick range covers the active tick at that block — a snapshot, not a TWAP. Liquidity-time-weighting emerges from the sequence of donations. Share price = totalAssets()/totalSupply(); uncollected v4 fees are latent NAV imported step-wise via collectYield() (permissionless) or any deposit/withdraw flush.',
+    body: 'Per donation event, v4 credits each LP L_i / Σ L_k, summed over every position on this exact PoolId whose tick range covers the active tick at that block — a snapshot, not a TWAP. Liquidity-time-weighting emerges from the sequence of donations. Share price = totalAssets()/totalSupply() is a step function: continuous in spot between flushes, with upward jumps when collectYield() (permissionless) or any deposit/withdraw imports latent v4 fee growth (a deterministic on-chain receivable kept outside totalAssets() to keep the realized side tamper-evident).',
   },
   {
     n: '04',
