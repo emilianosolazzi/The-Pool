@@ -55,14 +55,17 @@ export function PlainEnglish({ deployment }: { deployment: Deployment }) {
         <>
           By default <span className="text-white font-semibold">80%</span> of
           that fee is sent into{' '}
-          <code className="rounded bg-white/5 px-1 font-mono">poolManager.donate()</code>{' '}
-          and shared{' '}
-          <span className="text-white font-semibold">liquidity-time-weighted at
-          the donation block</span> across every in-range LP. The vault is one
-          such LP and captures{' '}
-          <span className="font-mono text-white">L_vault / Σ L_j</span> of
-          each donation. Late LPs do not retroactively dilute past donations,
-          but they do dilute future ones in proportion to their liquidity.{' '}
+          <code className="rounded bg-white/5 px-1 font-mono">poolManager.donate()</code>.{' '}
+          Per donation, v4 credits each in-range position{' '}
+          <span className="font-mono text-white">L_j / Σ L_k</span>, where{' '}
+          <span className="font-mono text-white">Σ L_k</span> sums every
+          Uniswap v4 LP whose tick range covers the active tick at that
+          block — a snapshot, not a TWAP. Liquidity-time-weighting{' '}
+          <em>emerges</em> from the sequence of donations: an LP that holds in
+          range across more donations earns more, because each donation is a
+          fresh snapshot. Late LPs cannot retroactively dilute past donations;
+          they do dilute every future one in proportion to their{' '}
+          <span className="font-mono text-white">L</span>.{' '}
           <span className="text-zinc-400">
             (The other 20% funds the treasury. Treasury share is
             owner-adjustable, hard-capped at 50%.)
@@ -75,21 +78,26 @@ export function PlainEnglish({ deployment }: { deployment: Deployment }) {
       body: (
         <>
           Your <span className="text-white font-semibold">share price</span> is
-          a single accounting truth:{' '}
+          the single accounting anchor:{' '}
           <code className="rounded bg-white/5 px-1 font-mono">totalAssets() / totalSupply()</code>.
           There is <span className="text-white">no per-user reward tracking</span>{' '}
-          — all attribution is share-based.{' '}
-          Mark-to-market repricing of the LP position happens continuously, but
-          realized v4 fees are imported into NAV{' '}
+          — all attribution is share-based. NAV has two components: the{' '}
+          <span className="text-white">realized</span> part counted in{' '}
+          <code className="rounded bg-white/5 px-1 font-mono">totalAssets()</code>{' '}
+          and the <span className="text-white">latent</span> part — uncollected
+          v4 LP fees that are economically owed to the vault but live outside{' '}
+          <code className="rounded bg-white/5 px-1 font-mono">totalAssets()</code>.
+          Mark-to-market repricing of the realized side happens continuously;
+          the latent side enters share price{' '}
           <span className="text-white">step-wise</span> when{' '}
           <code className="rounded bg-white/5 px-1 font-mono">collectYield()</code>{' '}
           (permissionless) or any{' '}
           <code className="rounded bg-white/5 px-1 font-mono">deposit</code>/
           <code className="rounded bg-white/5 px-1 font-mono">withdraw</code>{' '}
-          path runs an implicit flush. To lock in unrealized fees before a
-          deposit/withdraw, anyone can call{' '}
+          flushes. Between flushes, share price is a lower bound on lifetime
+          entitlement; anyone can call{' '}
           <code className="rounded bg-white/5 px-1 font-mono">collectYield()</code>{' '}
-          first.
+          first to trade against the post-flush price.
         </>
       ),
     },

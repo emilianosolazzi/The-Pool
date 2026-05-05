@@ -254,12 +254,17 @@ export function ReserveStatus({ deployment, chainId, explorerBase }: Props) {
           <p className="mt-2 max-w-2xl text-xs text-zinc-500">
             <span className="text-zinc-300">Quote source &amp; gate.</span>{' '}
             Vault price is posted by an allowlisted keeper (Safe-managed). Each
-            fill is gated on-chain against live spot:{' '}
+            fill is gated on-chain against live spot, directionally:{' '}
             <code className="rounded bg-white/5 px-1 font-mono">
               fill ⇔ P_spot ≤ P_vault
             </code>{' '}
-            when the vault sells token1 (mirrored when it sells token0). A
-            stale or mispriced quote cannot execute against the pool.{' '}
+            when the vault sells token1, and{' '}
+            <code className="rounded bg-white/5 px-1 font-mono">
+              fill ⇔ P_spot ≥ P_vault
+            </code>{' '}
+            when it sells token0 (PRICE_IMPROVEMENT mode; VAULT_SPREAD flips
+            the inequality). A stale or mispriced quote cannot execute against
+            the pool.{' '}
             <a
               href="https://github.com/emilianosolazzi/The-Pool/blob/main/docs/SPEC.md#34-reserve-fill-execution--invariants"
               target="_blank"

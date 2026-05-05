@@ -16,7 +16,7 @@ const steps = [
   {
     n: '03',
     title: 'Share price accrues',
-    body: 'Donated fees split liquidity-time-weighted across in-range LPs at the donation block. The vault captures L_vault / Σ L_j per donation — no privileged channel. Share price = totalAssets()/totalSupply(); realized v4 fees enter NAV step-wise on collectYield() (permissionless) and on every deposit/withdraw flush.',
+    body: 'Per donation, v4 credits each in-range LP L_j / Σ L_k, where Σ L_k is summed over every Uniswap v4 position whose tick range covers the active tick at that block — a snapshot, not a TWAP. Liquidity-time-weighting emerges from the sequence of donations. Share price = totalAssets()/totalSupply(); uncollected v4 fees are latent NAV imported step-wise via collectYield() (permissionless) or any deposit/withdraw flush.',
   },
   {
     n: '04',

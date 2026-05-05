@@ -28,15 +28,19 @@ export function Hero({ pairSymbol }: { pairSymbol: string; swapUrl?: string }) {
             <span className="text-zinc-400">— variable, uncapped.</span>{' '}
             Each hooked swap routes 80% of its fee into{' '}
             <code className="rounded bg-white/5 px-1 font-mono text-sm">poolManager.donate()</code>.
-            That fee is split <em>liquidity-time-weighted at the donation
-            block</em> across every in-range LP, so vault depositors capture{' '}
-            <span className="font-mono text-white">L_vault / Σ L_j</span>{' '}
-            of each donation.{' '}
+            Per donation, v4 credits each in-range position{' '}
+            <span className="font-mono text-white">L_j / Σ L_k</span>{' '}
+            of the fee, where{' '}
+            <span className="font-mono text-white">Σ L_k</span>{' '}
+            is summed over every Uniswap v4 LP whose tick range covers the
+            active tick at that block. Liquidity-time-weighting is the
+            sequence of those snapshots — late LPs do not retroactively dilute
+            past donations, but they do dilute every future one in proportion
+            to their{' '}
+            <span className="font-mono text-white">L</span>.{' '}
             <span className="text-zinc-400">
-              Vault liquidity is presently dominant in the active range. That is
-              today’s market state, not a protocol invariant; any third party can
-              mint an overlapping range and dilute future donations
-              proportional to their L<sub>j</sub>.
+              Vault liquidity is presently dominant in the active range — a
+              market state, not a protocol invariant.
             </span>
           </li>
           <li>
@@ -69,7 +73,7 @@ export function Hero({ pairSymbol }: { pairSymbol: string; swapUrl?: string }) {
         {/* Compact risk row — replaces the long disclaimer paragraph */}
         <div className="mt-8 flex flex-wrap gap-2 text-xs">
           <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-amber-200">
-            Fees only accrue on hooked swap flow that crosses the active range
+            Fees only accrue while spot is inside the active range during a hooked swap
           </span>
           <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-amber-200">
             Concentrated-LP exposure includes IL vs USDC

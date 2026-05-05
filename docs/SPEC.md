@@ -82,26 +82,36 @@ Reserve proceeds are flushed into idle balances by
 
 ### 2.4 Share-price model
 
-There is one accounting truth: share price = `convertToAssets(1e18)`. The
-contract does **not** track per-user reward balances. All depositor
-attribution is share-based; transfer of shares transfers all unrealized
+Share price = `convertToAssets(1e18)` is the single accounting anchor;
+the contract does **not** track per-user reward balances. All depositor
+attribution is share-based; transferring shares transfers all unrealized
 NAV proportionally.
 
-Two complementary mechanisms:
+NAV decomposes into two components, only one of which is on-chain at any
+given moment:
 
-- **Continuous (mark-to-market):** `totalAssets()` reprices the v4
-  position, idle other-token, escrow, and pending proceeds at every
-  read. Spot moves change share price between flushes only via the
-  in-range LP value $Q(O_\text{pos}, P_\text{spot}) + A_\text{pos}$.
-- **Step-wise (flush):** `_collectYield()` and
-  `_pullReserveProceedsBoth()` migrate value from off-NAV (uncollected
-  v4 fees, hook-held proceeds) into in-NAV idle balances. Share price
-  jumps at flush; size of jump = realized fees + claimed proceeds.
+- **Realized NAV** — counted in `totalAssets()`: idle balances, in-NFT
+  liquidity (priced at $P_\text{spot}$), idle other-token + reserve
+  escrow + pending proceeds (priced at $P_\text{clamp}$).
+- **Latent NAV** — *not* in `totalAssets()`: uncollected Uniswap v4 LP
+  fees on the vault's NFT position. These are economically owed to the
+  vault but realized only by `IPositionManager.collect`.
 
-A pure ERC-4626 reading is a lower bound on lifetime depositor
-entitlement. Permissionless `collectYield()` is the user's escape hatch:
-they can force a flush before any deposit/withdraw to lock in unrealized
-LP fees into the share price they trade against.
+Two update mechanisms therefore act on share price:
+
+- **Continuous mark-to-market** of *realized* NAV. Spot moves reprice
+  $A_\text{pos} + Q(O_\text{pos}, P_\text{spot})$ on every read.
+- **Step-wise flush** that migrates *latent* NAV → realized NAV.
+  Triggered by `_collectYield()` (called from permissionless
+  `collectYield()` and from every deposit / mint / withdraw / redeem /
+  rebalance) and by `_pullReserveProceedsBoth()`.
+
+Consequence: between flushes, share price is **not** fully
+mark-to-market. A pure ERC-4626 read is a lower bound on lifetime
+depositor entitlement. Any user can call permissionless `collectYield()`
+before depositing or withdrawing to force a flush and trade against the
+post-flush share price. This makes the latency between latent and
+realized NAV bounded by the user's gas, not by trust.
 
 ## 3. Hook execution (Execution layer)
 
@@ -147,36 +157,61 @@ liquidity active at the donation tick at the moment of the donation** —
 they are not retroactive and are not held in escrow. From v4
 PoolManager's perspective this is a one-tick fee-growth credit.
 
-### 3.3 LP share — temporal aggregation
+### 3.3 LP share — formal definition
 
-Donated fees are distributed by Uniswap v4's standard fee-growth-per-tick
-accounting. For an LP whose position spans the donation tick and whose
-liquidity at donation time is $L_i$:
+`FeeDistributor` calls `poolManager.donate(poolKey, a0, a1, "")`. v4's
+fee-growth-per-tick accounting credits this donation to the in-range
+liquidity at the *donation block*. We make this explicit.
 
-$$
-\text{vault claim}_i = f_\text{LP} \cdot \frac{L_\text{vault}^{(t_d)}}{\sum_j L_j^{(t_d)}}
-$$
-
-evaluated at the donation block $t_d$. This is **liquidity-time-weighted
-in the standard v4 sense**: an LP that joins the same range *after* the
-donation block does not retroactively dilute the donation. They only
-share future donations from their join block onward.
-
-The vault's depositor-level share of any single donation is therefore:
+**Definitions.** Let $t_d$ = block number of donation $d$. Let
+$\tau_d$ = active tick of `poolKey` at $t_d$, read from
+`StateLibrary.getSlot0`. Define
 
 $$
-\text{depositor share} = \frac{L_\text{vault}^{(t_d)}}{\sum_j L_j^{(t_d)}} \cdot \frac{1}{\text{vault.totalSupply}}
+\mathcal{S}(t_d) := \{\,j \in \text{Uniswap v4 LP positions on this exact poolKey} \;\mid\; \text{tickLower}_j \le \tau_d < \text{tickUpper}_j\,\}
 $$
 
-per share. Composability with external in-range LPs is a *first-class
-risk*: the vault has no privileged donation channel.
+This is the set of every Uniswap v4 LP position on this pool — vault,
+third parties, anyone — whose tick range contains the active tick at
+$t_d$. Positions that are out of range, on a different pool, or on a
+different hook are excluded by v4's per-pool fee-growth accounting.
+For $j \in \mathcal{S}(t_d)$, $L_j^{(t_d)}$ is that position's raw
+$L$ value at $t_d$ (Uniswap v4 liquidity units, not USD).
+
+**Per-donation share (snapshot model).** At a *single* donation block:
+
+$$
+\text{credit}_j(d) = f_\text{LP}(d) \cdot \frac{L_j^{(t_d)}}{\displaystyle\sum_{k \in \mathcal{S}(t_d)} L_k^{(t_d)}}
+$$
+
+This is a *block-instantaneous proportional* credit, not a TWAP. It uses
+only the active liquidity at $t_d$.
+
+**Aggregate over time (time-weighting emerges from sequence).** The
+vault's lifetime claim is
+
+$$
+\text{vault lifetime credit} = \sum_{d \,:\, \text{vault} \in \mathcal{S}(t_d)} f_\text{LP}(d) \cdot \frac{L_\text{vault}^{(t_d)}}{\displaystyle\sum_{k \in \mathcal{S}(t_d)} L_k^{(t_d)}}
+$$
+
+Liquidity-time-weighting is *implicit* in this sum: an LP that holds
+$L$ in range across more donation blocks earns more, exactly because
+each donation is a fresh snapshot. There is no separate TWAP layer in
+the contract; the time-weighting is a property of the donation sequence,
+not of any per-position duration accumulator.
+
+**Forward-looking dilution.** An LP minting a position at $t > t_d$
+appears in $\mathcal{S}(t_{d'})$ only for donations $d'$ with $t_{d'} \ge t$.
+They cannot retroactively dilute donation $d$. They do dilute every
+subsequent donation in proportion to their $L$.
 
 > **Today-state vs invariant.** As of the deployment block, vault
-> liquidity is the only material in-range LP on the WETH/USDC pool with
-> this hook. That is a market state, not an invariant. The pool is
-> permissionless; any third party can mint a Uniswap v4 position that
-> overlaps the vault's tick band and dilute future donations
-> proportional to their $L_j$. The vault has no power to block this.
+> liquidity is the only material position in $\mathcal{S}(\tau_\text{now})$
+> on the WETH/USDC poolKey with this hook. That is a market state, not
+> a protocol invariant. The pool is permissionless; any third party
+> can mint a Uniswap v4 position whose tick range covers the active
+> tick and immediately enter $\mathcal{S}$ for all future donations.
+> The vault has no power to block this.
 
 ### 3.4 Reserve-fill execution — invariants
 
@@ -237,15 +272,19 @@ keepers can re-quote without inspecting per-block reverts.
 
 `vaultStatus(vault)` exposed by `VaultLens` reports
 `{UNCONFIGURED, PAUSED, IN_RANGE, OUT_OF_RANGE}`. Note that **IN_RANGE
-means *eligible* to earn**, not *currently earning*. Actual fee accrual
-requires:
+means *eligible* to earn**, not *currently earning*. Fee accrual on the
+vault position over a window $W$ is positive iff:
 
 $$
-\text{accruing} \iff \text{IN\_RANGE} \;\wedge\; \exists\, \text{hooked swap with } \Delta_\text{out} > 0 \text{ in current block}
+\text{accruing}(W) \iff \exists\, t \in W \;\text{s.t.}\; \big( \tau(t) \in [\text{tickLower}_\text{vault}, \text{tickUpper}_\text{vault}) \;\wedge\; \text{a swap routes through the hook at } t \big)
 $$
 
-Idle in-range periods earn zero. Concentrated-liquidity is a
-*conditional* flow asset.
+The swap need not *cross* the range; any in-range swap (even one whose
+pre- and post-tick are both inside the vault's band) generates v4 fee
+growth that the position will collect on the next flush. What is
+required is (a) spot inside the vault's band at swap time and (b)
+non-zero hooked volume. Idle in-range periods earn zero.
+Concentrated-liquidity is a *conditional* flow asset.
 
 ### 4.2 Reserve offer state
 
