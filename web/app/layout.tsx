@@ -17,13 +17,13 @@ const jetbrains = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'The Pool — Fee-yield Uniswap v4 LP vault',
+  title: 'The Pool — USDC yield from real Uniswap v4 swaps',
   description:
-    'Fee-only LP yield on Uniswap v4. 25 bps dynamic hook fee, 80% donated back to the pool on every swap (treasury share owner-adjustable, capped at 50%). Share price accrues as fees come in. No token, no emissions, no lockups.',
+    'Deposit USDC, earn LP fees from real Uniswap v4 trading on Arbitrum One. Every hooked swap donates 80% of the fee back to LPs in the same transaction. The first $100K of TVL also captures 50% of the treasury stream for 180 days, paid in USDC. No emissions, no lockups.',
   openGraph: {
-    title: 'The Pool',
+    title: 'The Pool — USDC yield from real Uniswap v4 swaps',
     description:
-      'Fee-only LP yield on Uniswap v4. 25 bps dynamic hook fee, 80% donated back to the pool on every swap. Share price accrues as fees come in.',
+      'Deposit USDC. Every hooked swap donates 80% back to LPs. First $100K TVL captures 50% of the treasury stream for 180 days, paid in USDC.',
     type: 'website',
   },
   icons: { icon: '/favicon.svg' },

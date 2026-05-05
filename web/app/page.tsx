@@ -4,6 +4,8 @@ import { useChainId } from 'wagmi';
 import { arbitrumSepolia } from 'wagmi/chains';
 import { Nav } from '@/components/Nav';
 import { Hero } from '@/components/Hero';
+import { ProofStrip } from '@/components/ProofStrip';
+import { ValuePreview } from '@/components/ValuePreview';
 import { PlainEnglish } from '@/components/PlainEnglish';
 import { StatsGrid } from '@/components/StatsGrid';
 import { VaultCard } from '@/components/VaultCard';
@@ -29,6 +31,10 @@ export default function HomePage() {
       <Nav />
       <main>
         <Hero pairSymbol={deployment.pairSymbol} swapUrl={deployment.swapUrl} />
+
+        <div id="proof">
+          <ProofStrip deployment={deployment} chainId={activeChainId} />
+        </div>
 
         <PlainEnglish deployment={deployment} />
 
@@ -58,13 +64,15 @@ export default function HomePage() {
           explorerBase={explorerBase}
         />
 
-        <SwapPanel
+        <ValuePreview deployment={deployment} chainId={activeChainId} />
+
+        <ReserveStatus
           deployment={deployment}
           chainId={activeChainId}
           explorerBase={explorerBase}
         />
 
-        <ReserveStatus
+        <SwapPanel
           deployment={deployment}
           chainId={activeChainId}
           explorerBase={explorerBase}

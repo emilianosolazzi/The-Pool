@@ -3,11 +3,17 @@ import type { Address } from 'viem';
 
 export type AppChainId = typeof arbitrum.id | typeof arbitrumSepolia.id;
 
+// Treat empty strings (Vercel default) as missing so hardcoded fallbacks win.
+const envStr = (key: string): string | undefined => {
+  const v = process.env[key];
+  return v && v.length > 0 ? v : undefined;
+};
+
 export const DEFAULT_CHAIN_ID: AppChainId =
-  (Number(process.env.NEXT_PUBLIC_DEFAULT_CHAIN_ID) as AppChainId) || arbitrum.id;
+  (Number(envStr('NEXT_PUBLIC_DEFAULT_CHAIN_ID')) as AppChainId) || arbitrum.id;
 
 const envAddr = (key: string): Address | undefined => {
-  const v = process.env[key];
+  const v = envStr(key);
   if (!v || !/^0x[a-fA-F0-9]{40}$/.test(v)) return undefined;
   return v as Address;
 };
@@ -47,11 +53,11 @@ export const DEPLOYMENTS: Record<AppChainId, Deployment> = {
       ('0x360e68faccca8ca495c1b759fd9eee466db9fb32' as Address),
     asset: envAddr('NEXT_PUBLIC_ASSET_ARB_ONE') ??
       ('0xaf88d065e77c8cC2239327C5EDb3A432268e5831' as Address), // USDC native
-    swapUrl: process.env.NEXT_PUBLIC_SWAP_URL_ARB_ONE ??
+    swapUrl: envStr('NEXT_PUBLIC_SWAP_URL_ARB_ONE') ??
       'https://app.uniswap.org/swap?chain=arbitrum&inputCurrency=0x82aF49447D8a07e3bd95BD0d56f35241523fBab1&outputCurrency=0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
-    assetSymbol: process.env.NEXT_PUBLIC_ASSET_SYMBOL ?? 'USDC',
-    assetDecimals: Number(process.env.NEXT_PUBLIC_ASSET_DECIMALS ?? 6),
-    pairSymbol: process.env.NEXT_PUBLIC_PAIR_SYMBOL ?? 'WETH / USDC',
+    assetSymbol: envStr('NEXT_PUBLIC_ASSET_SYMBOL') ?? 'USDC',
+    assetDecimals: Number(envStr('NEXT_PUBLIC_ASSET_DECIMALS') ?? '6'),
+    pairSymbol: envStr('NEXT_PUBLIC_PAIR_SYMBOL') ?? 'WETH / USDC',
   },
   [arbitrumSepolia.id]: {
     vault: envAddr('NEXT_PUBLIC_VAULT_ARB_SEPOLIA'),
@@ -63,7 +69,7 @@ export const DEPLOYMENTS: Record<AppChainId, Deployment> = {
     poolManager: envAddr('NEXT_PUBLIC_POOL_MANAGER_ARB_SEPOLIA') ??
       ('0xFB3e0C6F74eB1a21CC1Da29aeC80D2Dfe6C9a317' as Address),
     asset: envAddr('NEXT_PUBLIC_ASSET_ARB_SEPOLIA'),
-    swapUrl: process.env.NEXT_PUBLIC_SWAP_URL_ARB_SEPOLIA ?? 'https://app.uniswap.org/swap?chain=arbitrum_sepolia',
+    swapUrl: envStr('NEXT_PUBLIC_SWAP_URL_ARB_SEPOLIA') ?? 'https://app.uniswap.org/swap?chain=arbitrum_sepolia',
     assetSymbol: 'tUSDC',
     assetDecimals: 6,
     pairSymbol: 'tWETH / tUSDC',
