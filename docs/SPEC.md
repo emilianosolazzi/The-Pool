@@ -42,6 +42,60 @@ share price. Value enters NAV only through:
 4. Off-vault ERC-20 escrow / proceeds claims, marked-to-market by
    `totalAssets()` at clamped pool price.
 
+### 1.1 Mechanical advantage summary vs Uniswap v3
+
+This subsection states, in spec form, the two structural edges this
+implementation has over a passive Uniswap v3 LP at the same range.
+Both are properties of **(I) this implementation**, not of v4 itself.
+Whether they outperform on any given day is empirical; whether they
+exist as mechanisms is by construction.
+
+The honest framing: this is a **higher-potential return distribution**,
+not a higher guaranteed return. The two edges below shift the shape of
+that distribution — they do not eliminate the downside that any
+concentrated-liquidity LP carries.
+
+1. **Reserve recovery — out-of-range inventory has an exit (I).**
+   A v3 LP whose range goes one-sided sits on drifting inventory until
+   price returns; until then the position earns zero fees and its
+   USD-denominated value tracks the losing leg. This vault's reserve
+   desk converts idle out-of-range inventory into realized USDC at
+   the band edge via a Safe-managed keeper, gated on-chain by a
+   directional AMM-spot price-improvement check
+   (`DynamicFeeHookV2._fillReserveOffer`,
+   `FeeDistributor._pullReserveProceedsBoth`). The state transition
+   "out of range" therefore means *yield-zero on hook fees, but
+   inventory recovers principal at the edge*, not *position is dead
+   weight*. v3 has no analogue.
+
+2. **Dynamic fee as adverse-selection tax (I).**
+   `DynamicFeeHookV2` scales the hooked-swap fee up to ~1.5× during
+   volatile blocks, hard-capped at 50 bps
+   (`DynamicFeeHookV2._dynamicFeeForBlock`). This is volatility-
+   conditioned rent extraction, not a static toll: LPs are charged
+   more when the swap flow they are filling is more likely to be
+   adversely informed, and less when it is benign. Whether the curve
+   is well-tuned at current volume is empirical — see
+   `docs/STRESS-TEST.md` once published. Whether the concept
+   structurally addresses toxic-flow elasticity is by design.
+
+Both edges interact: the dynamic fee taxes the trades that move price
+toward the band edge; the reserve desk realizes inventory at that edge.
+They are complementary mechanisms on the *same* drift event, which is
+why this implementation is described as "adaptive reserve" rather than
+"yet another v4 hook."
+
+What this subsection does **not** claim:
+
+- It does not claim guaranteed outperformance of v3 in any window.
+- It does not claim impermanent loss is eliminated; concentrated-
+  liquidity exposure remains.
+- It does not claim the dynamic-fee curve is optimal; it claims the
+  curve exists and is bounded.
+- It does not claim the reserve desk is trustless; the keeper is Safe-
+  managed and the on-chain gate is the price-improvement check, not
+  the keeper's identity.
+
 ## 2. NAV accounting (ERC-4626 layer)
 
 ### 2.1 Definitions
