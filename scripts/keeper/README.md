@@ -8,9 +8,14 @@ the policy.
 ## Requirements
 
 - Node.js 20+
-- The keeper key must be the vault `owner()` —
-  `offerReserveToHookWithMode` and `rebalanceOfferWithMode` are both
-  `onlyOwner`.
+- Production uses controller mode: `LiquidityVaultV2.owner()` is
+   `VaultOwnerController`, and the keeper signs through
+   `KEEPER_WRITE_TARGET`.
+- The write key must resolve to an allowlisted controller keeper. Current
+   production hot reserve keeper EOA:
+   `0x5cb4D906f0464B34C44d6555A770BF6af4a2CeFE`.
+- The Safe/controller owner can also operate manually, but the hot keeper can
+   only call typed reserve operations.
 
 ## Install
 
@@ -23,11 +28,12 @@ npm install
 
 ```bash
 export ARBITRUM_RPC_URL=https://arb1.arbitrum.io/rpc
-export KEEPER_PRIVATE_KEY=0x...        # vault owner key
+export KEEPER_PRIVATE_KEY=0x...        # hot keeper key; EOA 0x5cb4D906f0464B34C44d6555A770BF6af4a2CeFE
 # Production (Arbitrum One, V2.1, Apr 2026):
 export VAULT=0xf79c2dc829cd3a2d8ceec353bdb1b2414ba1eee0       # LiquidityVaultV2
 export VAULT_LENS=0x12e86890b75fdee22a35be66550373936d883551  # VaultLens (vaultStatus reads)
 export HOOK=0x486579DE6391053Df88a073CeBd673dd545200cC        # DynamicFeeHookV2
+export KEEPER_WRITE_TARGET=0xa0e1580CAe87027D023E9dE94899346BFA383724 # VaultOwnerController
 
 # Tunables (defaults shown)
 export SPREAD_BPS=25

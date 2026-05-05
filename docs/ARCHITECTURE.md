@@ -33,6 +33,15 @@ Current production addresses are tracked in `docs/DEPLOYED_ADDRESSES.md`.
 | `VaultLens` | `0x12e86890b75fdee22a35be66550373936d883551` |
 | `BootstrapRewards` | `0x3E6Ed05c1140612310DDE0d0DDaAcCA6e0d7a03d` |
 
+Operational production roles:
+
+| Role | Arbitrum One address / status |
+|---|---|
+| Reserve desk write target | `VaultOwnerController` at `0xa0e1580CAe87027D023E9dE94899346BFA383724` |
+| Hot reserve keeper EOA | `0x5cb4D906f0464B34C44d6555A770BF6af4a2CeFE` |
+| Keeper allowlist status | `reserveKeepers(0x5cb4D906f0464B34C44d6555A770BF6af4a2CeFE) == true` |
+| Controller owner / Safe | `0x75062AF3303d80eE4Cd33602866bFA4f63b485f5` |
+
 ```text
 Swapper
   |
@@ -440,6 +449,8 @@ Archived V1 deployment scripts live under `script/archive-v1/` and should not be
 The keeper in `scripts/keeper/reserveKeeper.ts` reads VaultLens, hook health, offer details, reserve proceeds, escrow, and hook counters. In write mode it can call the controller reserve paths; in `READ_ONLY=true` mode it exports live Prometheus metrics without requiring a private key.
 
 In controller mode, the keeper must not require `keeperEOA == vault.owner()`. The correct checks are `vault.owner() == KEEPER_WRITE_TARGET` and `controller.reserveKeepers(keeperEOA) == true`.
+
+The current production hot reserve keeper EOA is `0x5cb4D906f0464B34C44d6555A770BF6af4a2CeFE`. It is the wallet that adjusts reserve offers through `offerReserveToHookWithMode`, `rebalanceOfferWithMode`, `cancelReserveOffer`, and `collectReserveProceeds`.
 
 The public Grafana bundle lives under `scripts/keeper/grafana-public/` and is intentionally separate from the private operator dashboard. Public panels should focus on trust and investor-visible state: TVL, share price, depositors, data freshness, offer state, quote drift, reserve fills, reserve inventory, and settlement backlog.
 

@@ -64,6 +64,20 @@ Hot reserve keeper
   -> can call only typed reserve operations
 ```
 
+Production operating roles:
+
+| Role | Address / status |
+|---|---|
+| Reserve desk write target | `VaultOwnerController` at `0xa0e1580CAe87027D023E9dE94899346BFA383724` |
+| Hot reserve keeper EOA | `0x5cb4D906f0464B34C44d6555A770BF6af4a2CeFE` |
+| Keeper allowlist status | `reserveKeepers(0x5cb4D906f0464B34C44d6555A770BF6af4a2CeFE) == true` |
+| Controller owner / Safe | `0x75062AF3303d80eE4Cd33602866bFA4f63b485f5` |
+
+The hot reserve keeper is the wallet that adjusts offers. It can post,
+rebalance, cancel, and collect reserve offers through typed controller
+functions. It cannot refresh NAV, pause the vault, change fees, rotate treasury,
+or use the raw `executeVaultOwnerCall(bytes)` path.
+
 BootstrapRewards is wired as:
 
 ```text
@@ -270,6 +284,7 @@ VAULT=0xf79c2dc829cd3a2d8ceec353bdb1b2414ba1eee0
 VAULT_LENS=0x12e86890b75fdee22a35be66550373936d883551
 HOOK=0x486579DE6391053Df88a073CeBd673dd545200cC
 KEEPER_WRITE_TARGET=0xa0e1580CAe87027D023E9dE94899346BFA383724
+KEEPER_PRIVATE_KEY=0x... # signer EOA: 0x5cb4D906f0464B34C44d6555A770BF6af4a2CeFE
 ```
 
 For public telemetry, use `READ_ONLY=true`, `LOOP=true`, and `METRICS_PORT=9464`. This performs real chain reads and exposes Prometheus metrics without loading `KEEPER_PRIVATE_KEY` or evaluating write actions. `DRY_RUN=true` is optional but redundant when `READ_ONLY=true`.

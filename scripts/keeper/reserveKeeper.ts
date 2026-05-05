@@ -5,14 +5,14 @@
  * `LiquidityVaultV2` so the vault monetises spread vs. the AMM mid as
  * additional NAV. See `docs/HOOK-RISK-RUNBOOK.md` §3.4 for the policy.
  *
- * By default the keeper key must be the vault `owner()`. If
- * `KEEPER_WRITE_TARGET` is set, the vault owner must be that controller
- * contract and the keeper key must be allowlisted by
+ * In direct-vault mode the keeper key must be the vault `owner()`. In
+ * production controller mode, `KEEPER_WRITE_TARGET` is the controller that
+ * owns the vault, and the keeper key must be allowlisted by
  * `controller.reserveKeepers(keeper)`.
  *
  * Required env:
  *   ARBITRUM_RPC_URL       JSON-RPC endpoint
- *   KEEPER_PRIVATE_KEY     0x-prefixed private key for the vault owner
+ *   KEEPER_PRIVATE_KEY     0x-prefixed private key for the vault owner or an allowlisted controller keeper
  *   VAULT                  LiquidityVaultV2 address
  *   VAULT_LENS             VaultLens address (provides vaultStatus(address))
  *   HOOK                   DynamicFeeHookV2 address

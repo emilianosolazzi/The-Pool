@@ -17,6 +17,21 @@
 | VaultLens             | `0x12e86890b75fdee22a35be66550373936d883551` |
 | BootstrapRewards      | `0x3E6Ed05c1140612310DDE0d0DDaAcCA6e0d7a03d` |
 
+### Operations roles
+
+| Role | Address / status |
+|------|------------------|
+| Reserve desk write target (`KEEPER_WRITE_TARGET`) | `0xa0e1580CAe87027D023E9dE94899346BFA383724` |
+| Hot reserve keeper EOA (adjusts reserve offers) | `0x5cb4D906f0464B34C44d6555A770BF6af4a2CeFE` |
+| Controller owner / Safe | `0x75062AF3303d80eE4Cd33602866bFA4f63b485f5` |
+| Ledger / real treasury | `0xe5f5Ef79b3DFF47EcDf7842645222e43AD0ed080` |
+
+The hot reserve keeper is allowlisted on the controller with
+`reserveKeepers(0x5cb4D906f0464B34C44d6555A770BF6af4a2CeFE) == true` and
+is the signer used by the automated reserve desk to post, rebalance, cancel,
+and collect reserve offers. It cannot refresh NAV or run admin calls; those go
+through the controller owner / Safe.
+
 > BootstrapRewards wired Apr 28 2026 (block 457108969):
 > `programStart = 1777348921`, `programEnd = 1792900921` (180 days, 6×30d epochs).
 > `FeeDistributor.treasury = bootstrap`; `bootstrap.realTreasury = Ledger`.
@@ -66,7 +81,7 @@ VAULT_LENS=0x12e86890b75fdee22a35be66550373936d883551
 HOOK=0x486579DE6391053Df88a073CeBd673dd545200cC
 KEEPER_WRITE_TARGET=0xa0e1580CAe87027D023E9dE94899346BFA383724
 ARBITRUM_RPC_URL=https://arb1.arbitrum.io/rpc
-KEEPER_PRIVATE_KEY=0x...   # required for writes; vault owner, or allowlisted controller keeper
+KEEPER_PRIVATE_KEY=0x...   # required for writes; signer EOA should be 0x5cb4D906f0464B34C44d6555A770BF6af4a2CeFE or another allowlisted keeper
 DRY_RUN=true               # simulate writes; flip to false only after first sanity tick
 READ_ONLY=false            # true = real chain reads/metrics only, no private key or writes
 METRICS_HOST=127.0.0.1     # Prometheus scrape bind address
