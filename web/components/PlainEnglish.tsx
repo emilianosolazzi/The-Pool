@@ -54,8 +54,14 @@ export function PlainEnglish({ deployment }: { deployment: Deployment }) {
       body: (
         <>
           By default <span className="text-white font-semibold">80%</span> of
-          that fee is donated back to in-range LPs in the pool — including the
-          vault once its position is active — in the same transaction.{' '}
+          that fee is sent into{' '}
+          <code className="rounded bg-white/5 px-1 font-mono">poolManager.donate()</code>{' '}
+          and shared{' '}
+          <span className="text-white font-semibold">pro-rata across every
+          in-range LP at the donation tick</span> — the vault is one such LP.
+          Today the vault is the only material in-range LP, so it captures most
+          of the donation; if other LPs join the same range that share is
+          diluted accordingly.{' '}
           <span className="text-zinc-400">
             (The other 20% funds the treasury. Treasury share is
             owner-adjustable, hard-capped at 50%.)
@@ -68,13 +74,15 @@ export function PlainEnglish({ deployment }: { deployment: Deployment }) {
       body: (
         <>
           Your <span className="text-white font-semibold">share price rises</span>{' '}
-          as in-range fees accrue — no claim, no staking. Anyone can call{' '}
+          automatically as donated fees compound into the LP position — no claim,
+          no staking, no per-user accrual step. The vault does run a periodic
+          state flush via{' '}
           <code className="rounded bg-white/5 px-1 font-mono">collectYield()</code>{' '}
-          to harvest fees. Deployment into active range occurs on{' '}
-          <code className="rounded bg-white/5 px-1 font-mono">deposit()</code>{' '}
-          and owner{' '}
-          <code className="rounded bg-white/5 px-1 font-mono">rebalance()</code>{' '}
-          paths.
+          (permissionless; anyone can call it), and{' '}
+          <code className="rounded bg-white/5 px-1 font-mono">deposit</code>/
+          <code className="rounded bg-white/5 px-1 font-mono">withdraw</code>{' '}
+          paths flush implicitly. Range moves are owner-only{' '}
+          (<code className="rounded bg-white/5 px-1 font-mono">rebalance()</code>).
         </>
       ),
     },

@@ -14,21 +14,35 @@ export function Hero({ pairSymbol }: { pairSymbol: string; swapUrl?: string }) {
         </div>
 
         <h1 className="max-w-4xl text-4xl font-semibold tracking-tight text-white md:text-6xl">
-          Earn USDC yield from real{' '}
-          <span className="gradient-text">Uniswap v4 trading activity</span>{' '}
-          — plus a 180-day early-depositor bonus.
+          USDC yield from real{' '}
+          <span className="gradient-text">Uniswap v4 trading activity</span>.
         </h1>
 
         <p className="mt-5 max-w-2xl text-balance text-lg text-zinc-300/90">
-          Every swap through our hook donates{' '}
-          <strong className="text-white">80% of the fee back to LPs</strong> in
-          the same transaction. The first{' '}
-          <strong className="text-white">$100K of TVL</strong> also captures{' '}
-          <strong className="text-white">50% of the treasury stream</strong>{' '}
-          for 180 days, paid in USDC.{' '}
-          <span className="text-zinc-400">
-            Pair: <span className="font-mono text-zinc-200">{pairSymbol}</span>.
-          </span>
+          Two distinct streams, kept separate on purpose:
+        </p>
+
+        <ul className="mt-4 max-w-2xl space-y-2 text-base text-zinc-300/90">
+          <li>
+            <span className="text-white font-semibold">Market yield</span>{' '}
+            <span className="text-zinc-400">— variable, uncapped.</span>{' '}
+            Each hooked swap routes 80% of its fee into{' '}
+            <code className="rounded bg-white/5 px-1 font-mono text-sm">poolManager.donate()</code>.
+            That fee is split <em>pro-rata across every in-range LP</em>, so vault
+            depositors capture roughly{' '}
+            <span className="font-mono text-white">vaultLiquidity / totalInRangeLiquidity</span>.
+            The vault is currently the only material in-range LP.
+          </li>
+          <li>
+            <span className="text-white font-semibold">Incentive yield</span>{' '}
+            <span className="text-zinc-400">— capped, scheduled, conditional.</span>{' '}
+            A 180-day early-depositor program funded from treasury inflows. Today
+            the epoch pool reads live below; caps and windows are on-chain.
+          </li>
+        </ul>
+
+        <p className="mt-3 max-w-2xl text-sm text-zinc-400">
+          Pair: <span className="font-mono text-zinc-200">{pairSymbol}</span>.
         </p>
 
         <div className="mt-8 flex flex-wrap items-center gap-3">
@@ -46,13 +60,16 @@ export function Hero({ pairSymbol }: { pairSymbol: string; swapUrl?: string }) {
         {/* Compact risk row — replaces the long disclaimer paragraph */}
         <div className="mt-8 flex flex-wrap gap-2 text-xs">
           <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-amber-200">
-            Fee capture only while range is in-range
+            Fees only accrue while liquidity is in-range
+          </span>
+          <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-amber-200">
+            Concentrated-LP exposure includes IL vs USDC
+          </span>
+          <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-amber-200">
+            Range is owner-controlled · Safe-rebalanced
           </span>
           <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-amber-200">
             Bonus capped: $25K/wallet · $10K/epoch
-          </span>
-          <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-amber-200">
-            7-day eligibility dwell · transfers may forfeit accrual
           </span>
           <a
             href="https://github.com/emilianosolazzi/The-Pool/blob/main/docs/HOOK-RISK-RUNBOOK.md"

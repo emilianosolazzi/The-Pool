@@ -16,7 +16,7 @@ const steps = [
   {
     n: '03',
     title: 'Share price accrues',
-    body: 'Donated fees flow to in-range LPs including the vault position once active; LiquidityVaultV2 share price rises from those fees — no claim, no staking. Anyone can call collectYield(); deployment into range occurs on deposit/rebalance paths.',
+    body: 'Donated fees accrue pro-rata to every in-range LP at the donation tick. The vault is one such LP — depositors capture vaultLiquidity / totalInRangeLiquidity of each donation. No per-user claim flow; share price flushes via permissionless collectYield() and via every deposit/withdraw.',
   },
   {
     n: '04',
@@ -88,7 +88,10 @@ export function HowItWorks({ deployment, chainId }: { deployment: Deployment; ch
             </p>
             <p className="mt-3">
               A reserve keeper can help reduce idle time by offering unused reserves
-              to swaps at a controlled spread.
+              to swaps. Reserve quotes are{' '}
+              <span className="text-zinc-200">posted by an allowlisted keeper</span>{' '}
+              (Safe-managed) and gated on-chain by an AMM-spot price-improvement
+              check before any fill — discretionary input, deterministic gate.
           </p>
           <p className="mt-3">
             <span className="text-white">Security</span> — anti-sandwich reference-price
@@ -97,6 +100,51 @@ export function HowItWorks({ deployment, chainId }: { deployment: Deployment; ch
             on every transfer.
           </p>
         </div>
+      </div>
+
+      <div className="mt-6 card p-5 text-sm leading-relaxed text-zinc-400">
+        <div className="text-white font-semibold">Risks &amp; custody model</div>
+        <ul className="mt-3 grid gap-2 md:grid-cols-2">
+          <li>
+            <span className="text-zinc-200">Impermanent loss.</span> Concentrated-LP
+            exposure is not USDC-flat: when WETH price moves inside the range,
+            the position rebalances against you relative to a USDC-only basis.
+          </li>
+          <li>
+            <span className="text-zinc-200">Range-shift risk.</span>{' '}
+            <code className="rounded bg-white/5 px-1 font-mono">rebalance()</code>{' '}
+            is owner-only via the Safe. Frequency and tick choice can change
+            fee capture timing; depositor accounting is unaffected.
+          </li>
+          <li>
+            <span className="text-zinc-200">Pro-rata dilution.</span> The 80%
+            donation is shared across <em>every</em> in-range LP. If third-party
+            LPs join the same range, the vault&apos;s share of each donation
+            falls accordingly.
+          </li>
+          <li>
+            <span className="text-zinc-200">Bonus is conditional.</span> Epoch
+            pool is funded only when treasury inflows arrive and{' '}
+            <code className="rounded bg-white/5 px-1 font-mono">pullInflow()</code>{' '}
+            is called. Caps and windows are on-chain; <em>funded</em> balance is
+            shown live below.
+          </li>
+          <li>
+            <span className="text-zinc-200">Reserve quote is discretionary.</span>{' '}
+            Posted by an allowlisted keeper. Fills are still gated by an
+            on-chain AMM-spot price-improvement check.
+          </li>
+          <li>
+            <span className="text-zinc-200">Custody &amp; admin.</span>{' '}
+            Vault is <code className="rounded bg-white/5 px-1 font-mono">Pausable</code>{' '}
+            and owned by{' '}
+            <code className="rounded bg-white/5 px-1 font-mono">VaultOwnerController</code>,
+            which is owned by a Safe multisig. Hot keeper can only call typed
+            reserve operations — no withdraw, no rebalance. Hook, vault, and
+            distributor contracts are non-upgradeable; migration would require
+            redeployment.
+          </li>
+        </ul>
       </div>
     </section>
   );

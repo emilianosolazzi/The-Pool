@@ -251,6 +251,13 @@ export function ReserveStatus({ deployment, chainId, explorerBase }: Props) {
             hook. Anyone can verify the offer, the price, and every fill — no
             indexer, straight from chain.
           </p>
+          <p className="mt-2 max-w-2xl text-xs text-zinc-500">
+            <span className="text-zinc-300">Quote source.</span> Vault price is
+            posted by an allowlisted keeper (Safe-managed). Each fill is gated
+            on-chain by an AMM-spot price-improvement check, so a stale or
+            mispriced quote cannot execute against the pool. Drift = pool spot −
+            vault quote, in bps.
+          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <a

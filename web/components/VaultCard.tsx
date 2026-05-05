@@ -401,14 +401,18 @@ export function VaultCard({ deployment, chainId }: { deployment: Deployment; cha
                 <div className="text-zinc-500">Checking vault range status…</div>
               ) : isInRange ? (
                 <div className="text-emerald-300">
-                  Range status: <span className="font-semibold">IN_RANGE</span>{' '}
-                  — using zap deposit by default.
+                  Range status:{' '}
+                  <span className="font-semibold">eligible to earn (in-range)</span>{' '}
+                  — vault liquidity sits within the active tick band, so it is
+                  on the donation list for incoming hooked swaps. Using zap
+                  deposit by default.
                 </div>
               ) : vaultStatus === VAULT_STATUS.OUT_OF_RANGE ? (
                 <div className="text-zinc-300">
                   Range status:{' '}
-                  <span className="font-semibold">OUT_OF_RANGE</span> — single-
-                  sided {deployment.assetSymbol} deployment is valid; using
+                  <span className="font-semibold">idle (out-of-range)</span> —
+                  single-sided {deployment.assetSymbol} deployment is valid but
+                  earns no swap fees until price re-enters the band. Using
                   plain deposit.
                 </div>
               ) : vaultStatus === VAULT_STATUS.PAUSED ? (
