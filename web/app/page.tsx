@@ -5,6 +5,7 @@ import { arbitrumSepolia } from 'wagmi/chains';
 import { Nav } from '@/components/Nav';
 import { Hero } from '@/components/Hero';
 import { ProofStrip } from '@/components/ProofStrip';
+import { YieldVsBaseline } from '@/components/YieldVsBaseline';
 import { ValuePreview } from '@/components/ValuePreview';
 import { PlainEnglish } from '@/components/PlainEnglish';
 import { StatsGrid } from '@/components/StatsGrid';
@@ -35,6 +36,8 @@ export default function HomePage() {
         <div id="proof">
           <ProofStrip deployment={deployment} chainId={activeChainId} />
         </div>
+
+        <YieldVsBaseline deployment={deployment} chainId={activeChainId} />
 
         <PlainEnglish deployment={deployment} />
 

@@ -31,6 +31,11 @@ export interface Deployment {
   assetSymbol: string;
   assetDecimals: number;
   pairSymbol: string;
+  /** Unix seconds. First-deposit / programStart. Used as t=0 for yield comparisons. */
+  launchedAt?: number;
+  /** Reference Uniswap v3 pool on the same pair, used as a passive-LP baseline. */
+  v3BaselinePool?: Address;
+  v3BaselineLabel?: string;
 }
 
 export const DEPLOYMENTS: Record<AppChainId, Deployment> = {
@@ -58,6 +63,12 @@ export const DEPLOYMENTS: Record<AppChainId, Deployment> = {
     assetSymbol: envStr('NEXT_PUBLIC_ASSET_SYMBOL') ?? 'USDC',
     assetDecimals: Number(envStr('NEXT_PUBLIC_ASSET_DECIMALS') ?? '6'),
     pairSymbol: envStr('NEXT_PUBLIC_PAIR_SYMBOL') ?? 'WETH / USDC',
+    // V2.1 BootstrapRewards programStart (also the effective vault launch).
+    launchedAt: Number(envStr('NEXT_PUBLIC_LAUNCHED_AT') ?? '1777348921'),
+    // Arbitrum One Uniswap v3 WETH/USDC 0.05% pool — passive-LP reference.
+    v3BaselinePool: envAddr('NEXT_PUBLIC_V3_BASELINE_POOL_ARB_ONE') ??
+      ('0xC6962004f452bE9203591991D15f6b388e09E8D0' as Address),
+    v3BaselineLabel: envStr('NEXT_PUBLIC_V3_BASELINE_LABEL') ?? 'Uniswap v3 WETH/USDC 0.05% (Arbitrum)',
   },
   [arbitrumSepolia.id]: {
     vault: envAddr('NEXT_PUBLIC_VAULT_ARB_SEPOLIA'),
