@@ -26,6 +26,12 @@ export const metadata: Metadata = {
       'Deposit USDC. Every hooked swap donates 80% back to LPs. First $100K TVL captures 50% of the treasury stream for 180 days, paid in USDC.',
     type: 'website',
   },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'The Pool — USDC yield from real Uniswap v4 swaps',
+    description:
+      'Deposit USDC. Every hooked swap donates 80% back to LPs. First $100K TVL captures 50% of the treasury stream for 180 days.',
+  },
   icons: { icon: '/favicon.svg' },
 };
 
