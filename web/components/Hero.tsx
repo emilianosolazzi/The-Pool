@@ -28,10 +28,16 @@ export function Hero({ pairSymbol }: { pairSymbol: string; swapUrl?: string }) {
             <span className="text-zinc-400">— variable, uncapped.</span>{' '}
             Each hooked swap routes 80% of its fee into{' '}
             <code className="rounded bg-white/5 px-1 font-mono text-sm">poolManager.donate()</code>.
-            That fee is split <em>pro-rata across every in-range LP</em>, so vault
-            depositors capture roughly{' '}
-            <span className="font-mono text-white">vaultLiquidity / totalInRangeLiquidity</span>.
-            The vault is currently the only material in-range LP.
+            That fee is split <em>liquidity-time-weighted at the donation
+            block</em> across every in-range LP, so vault depositors capture{' '}
+            <span className="font-mono text-white">L_vault / Σ L_j</span>{' '}
+            of each donation.{' '}
+            <span className="text-zinc-400">
+              Vault liquidity is presently dominant in the active range. That is
+              today’s market state, not a protocol invariant; any third party can
+              mint an overlapping range and dilute future donations
+              proportional to their L<sub>j</sub>.
+            </span>
           </li>
           <li>
             <span className="text-white font-semibold">Incentive yield</span>{' '}
@@ -55,12 +61,15 @@ export function Hero({ pairSymbol }: { pairSymbol: string; swapUrl?: string }) {
           <a href="/value" className="btn-ghost">
             Calculate my yield
           </a>
+          <a href="https://github.com/emilianosolazzi/The-Pool/blob/main/docs/SPEC.md" target="_blank" rel="noopener noreferrer" className="btn-ghost">
+            Protocol spec ↗
+          </a>
         </div>
 
         {/* Compact risk row — replaces the long disclaimer paragraph */}
         <div className="mt-8 flex flex-wrap gap-2 text-xs">
           <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-amber-200">
-            Fees only accrue while liquidity is in-range
+            Fees only accrue on hooked swap flow that crosses the active range
           </span>
           <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-amber-200">
             Concentrated-LP exposure includes IL vs USDC

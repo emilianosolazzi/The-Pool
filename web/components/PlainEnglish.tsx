@@ -57,11 +57,12 @@ export function PlainEnglish({ deployment }: { deployment: Deployment }) {
           that fee is sent into{' '}
           <code className="rounded bg-white/5 px-1 font-mono">poolManager.donate()</code>{' '}
           and shared{' '}
-          <span className="text-white font-semibold">pro-rata across every
-          in-range LP at the donation tick</span> — the vault is one such LP.
-          Today the vault is the only material in-range LP, so it captures most
-          of the donation; if other LPs join the same range that share is
-          diluted accordingly.{' '}
+          <span className="text-white font-semibold">liquidity-time-weighted at
+          the donation block</span> across every in-range LP. The vault is one
+          such LP and captures{' '}
+          <span className="font-mono text-white">L_vault / Σ L_j</span> of
+          each donation. Late LPs do not retroactively dilute past donations,
+          but they do dilute future ones in proportion to their liquidity.{' '}
           <span className="text-zinc-400">
             (The other 20% funds the treasury. Treasury share is
             owner-adjustable, hard-capped at 50%.)
@@ -73,16 +74,22 @@ export function PlainEnglish({ deployment }: { deployment: Deployment }) {
       label: '05',
       body: (
         <>
-          Your <span className="text-white font-semibold">share price rises</span>{' '}
-          automatically as donated fees compound into the LP position — no claim,
-          no staking, no per-user accrual step. The vault does run a periodic
-          state flush via{' '}
+          Your <span className="text-white font-semibold">share price</span> is
+          a single accounting truth:{' '}
+          <code className="rounded bg-white/5 px-1 font-mono">totalAssets() / totalSupply()</code>.
+          There is <span className="text-white">no per-user reward tracking</span>{' '}
+          — all attribution is share-based.{' '}
+          Mark-to-market repricing of the LP position happens continuously, but
+          realized v4 fees are imported into NAV{' '}
+          <span className="text-white">step-wise</span> when{' '}
           <code className="rounded bg-white/5 px-1 font-mono">collectYield()</code>{' '}
-          (permissionless; anyone can call it), and{' '}
+          (permissionless) or any{' '}
           <code className="rounded bg-white/5 px-1 font-mono">deposit</code>/
           <code className="rounded bg-white/5 px-1 font-mono">withdraw</code>{' '}
-          paths flush implicitly. Range moves are owner-only{' '}
-          (<code className="rounded bg-white/5 px-1 font-mono">rebalance()</code>).
+          path runs an implicit flush. To lock in unrealized fees before a
+          deposit/withdraw, anyone can call{' '}
+          <code className="rounded bg-white/5 px-1 font-mono">collectYield()</code>{' '}
+          first.
         </>
       ),
     },

@@ -16,7 +16,7 @@ const steps = [
   {
     n: '03',
     title: 'Share price accrues',
-    body: 'Donated fees accrue pro-rata to every in-range LP at the donation tick. The vault is one such LP — depositors capture vaultLiquidity / totalInRangeLiquidity of each donation. No per-user claim flow; share price flushes via permissionless collectYield() and via every deposit/withdraw.',
+    body: 'Donated fees split liquidity-time-weighted across in-range LPs at the donation block. The vault captures L_vault / Σ L_j per donation — no privileged channel. Share price = totalAssets()/totalSupply(); realized v4 fees enter NAV step-wise on collectYield() (permissionless) and on every deposit/withdraw flush.',
   },
   {
     n: '04',
