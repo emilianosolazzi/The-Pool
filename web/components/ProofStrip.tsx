@@ -111,10 +111,11 @@ export function ProofStrip({ deployment, chainId }: Props) {
   const sym = deployment.assetSymbol;
   const dec = deployment.assetDecimals;
 
-  const cells: { label: string; value: string | undefined; sub: string; pulse?: boolean }[] = [
+  const cells: { label: string; value: string | undefined; unit?: string; sub: string; pulse?: boolean }[] = [
     {
       label: 'TVL',
-      value: tvl !== undefined ? `${fmtCompact(tvl, dec)} ${sym}` : undefined,
+      value: tvl !== undefined ? fmtCompact(tvl, dec) : undefined,
+      unit: sym,
       sub: 'Live vault assets',
     },
     {
@@ -129,7 +130,7 @@ export function ProofStrip({ deployment, chainId }: Props) {
       // one uint256, so we deliberately do NOT label this with a currency.
       // We render the raw 6-dec scaled value as a swap-activity proxy.
       value: feesRouted !== undefined ? fmtCompact(feesRouted, dec) : undefined,
-      sub: 'Mixed-currency, lifetime',
+      sub: 'Mixed-currency',
       pulse: feesPulse,
     },
     {
@@ -139,7 +140,8 @@ export function ProofStrip({ deployment, chainId }: Props) {
     },
     {
       label: 'Bonus pool',
-      value: bonusActual !== undefined ? `${fmtCompact(bonusActual, dec)} ${sym}` : undefined,
+      value: bonusActual !== undefined ? fmtCompact(bonusActual, dec) : undefined,
+      unit: sym,
       sub: 'Epoch 0, claimable',
     },
     {
@@ -180,13 +182,20 @@ export function ProofStrip({ deployment, chainId }: Props) {
                 {c.label}
               </div>
               {c.value !== undefined ? (
-                <div className="mt-2 truncate font-mono text-xl font-semibold text-white md:text-2xl lg:text-[1.625rem]">
-                  {c.value}
+                <div className="mt-2 flex items-baseline gap-1.5 font-mono text-white">
+                  <span className="truncate text-xl font-semibold md:text-2xl">
+                    {c.value}
+                  </span>
+                  {c.unit && (
+                    <span className="text-xs font-medium text-zinc-400 md:text-sm">
+                      {c.unit}
+                    </span>
+                  )}
                 </div>
               ) : (
                 <div className="mt-2 h-7 w-2/3 animate-pulse rounded bg-white/10 md:h-8" />
               )}
-              <div className="mt-1 truncate text-xs text-zinc-500 md:text-sm">{c.sub}</div>
+              <div className="mt-1 text-xs text-zinc-500 md:text-sm">{c.sub}</div>
             </div>
           ))}
         </div>
