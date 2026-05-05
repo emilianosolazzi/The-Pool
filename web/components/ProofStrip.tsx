@@ -47,7 +47,7 @@ export function ProofStrip({ deployment, chainId }: Props) {
     allowFailure: true,
     contracts: hook
       ? ([
-          { address: hook, abi: hookAbi, functionName: 'totalFeesRouted', chainId },
+          { address: hook, abi: hookAbi, functionName: 'totalSwaps', chainId },
           { address: hook, abi: hookAbi, functionName: 'totalReserveFills', chainId },
         ] as const)
       : [],
@@ -89,24 +89,24 @@ export function ProofStrip({ deployment, chainId }: Props) {
   const tvl = stats && Array.isArray(stats) ? (stats[0] as bigint) : undefined;
   const sharePrice = stats && Array.isArray(stats) ? (stats[1] as bigint) : undefined;
   const depositors = stats && Array.isArray(stats) ? (stats[2] as bigint) : undefined;
-  const feesRouted = hookCounters?.[0]?.status === 'success' ? (hookCounters[0].result as bigint) : undefined;
+  const totalSwaps = hookCounters?.[0]?.status === 'success' ? (hookCounters[0].result as bigint) : undefined;
   const reserveFills = hookCounters?.[1]?.status === 'success' ? (hookCounters[1].result as bigint) : undefined;
   const bonusPool = bootstrapEpoch0 && Array.isArray(bootstrapEpoch0) ? (bootstrapEpoch0[0] as bigint) : undefined;
   const bonusActual = (bonusPool ?? 0n) > (bootstrapBalance ?? 0n) ? bonusPool : bootstrapBalance ?? bonusPool;
 
-  // Liveness pulse: flash when totalFeesRouted increases between polls.
-  const prevFees = useRef<bigint | undefined>(undefined);
-  const [feesPulse, setFeesPulse] = useState(false);
+  // Liveness pulse: flash when totalSwaps increases between polls.
+  const prevSwaps = useRef<bigint | undefined>(undefined);
+  const [swapsPulse, setSwapsPulse] = useState(false);
   useEffect(() => {
-    if (feesRouted === undefined) return;
-    if (prevFees.current !== undefined && feesRouted > prevFees.current) {
-      setFeesPulse(true);
-      const t = setTimeout(() => setFeesPulse(false), 2_500);
-      prevFees.current = feesRouted;
+    if (totalSwaps === undefined) return;
+    if (prevSwaps.current !== undefined && totalSwaps > prevSwaps.current) {
+      setSwapsPulse(true);
+      const t = setTimeout(() => setSwapsPulse(false), 2_500);
+      prevSwaps.current = totalSwaps;
       return () => clearTimeout(t);
     }
-    prevFees.current = feesRouted;
-  }, [feesRouted]);
+    prevSwaps.current = totalSwaps;
+  }, [totalSwaps]);
 
   const sym = deployment.assetSymbol;
   const dec = deployment.assetDecimals;
@@ -124,14 +124,10 @@ export function ProofStrip({ deployment, chainId }: Props) {
       sub: '1 share → asset',
     },
     {
-      label: 'Hook fees routed',
-      // Note: totalFeesRouted aggregates the *output*-side delta of every hooked
-      // swap. On a WETH/USDC pool that mixes 6-dec USDC and 18-dec WETH into
-      // one uint256, so we deliberately do NOT label this with a currency.
-      // We render the raw 6-dec scaled value as a swap-activity proxy.
-      value: feesRouted !== undefined ? fmtCompact(feesRouted, dec) : undefined,
-      sub: 'Mixed-currency',
-      pulse: feesPulse,
+      label: 'Swaps',
+      value: totalSwaps !== undefined ? totalSwaps.toString() : undefined,
+      sub: 'Hook-routed',
+      pulse: swapsPulse,
     },
     {
       label: 'Reserve fills',
