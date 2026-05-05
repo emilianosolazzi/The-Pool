@@ -3,28 +3,24 @@
 /**
  * ValuePreview — homepage teaser for the full /value calculator.
  *
- * Reads live TVL, lifetime hook fees routed, BootstrapRewards.programStart
- * (used as proxy for "vault live since"), and the epoch-0 bonus pool. Then
- * shows a single-line projection for a $1,000 depositor based ONLY on what is
- * already on-chain (no synthetic volume assumption). Both the lifetime rate
- * and the annualized rate are shown so visitors don't misread "$X over the
- * lifetime fee window" as an annual yield.
+ * Honest-by-construction:
+ *   - We deliberately do NOT compute a "$X / year" projection from
+ *     `totalFeesRouted` on the homepage. That counter is denominated in
+ *     whichever currency was the *output* of each swap, so on a WETH/USDC
+ *     pool it sums 6-dec USDC and 18-dec WETH into a single uint256. Any
+ *     attempt to treat that mixed sum as USDC overstates the yield by ~1e12.
+ *   - We also do not extrapolate annualized rates while TVL is in the
+ *     bootstrap window. Dividing real fees by a $12 TVL produces numbers
+ *     that are technically correct but misleading.
  *
- * Math (deliberately conservative; full sensitivity model lives at /value):
- *   - feeYieldLifetime = hookFeesRouted / TVL
- *   - daysLive         = max(1, (now - programStart) / 86400)
- *   - feeYieldAnnual   = feeYieldLifetime * (365 / daysLive)
- *   - LP_SHARE         = 80% (FeeDistributor default LP-side donation)
- *   - userYearOnFees   = 1000 * feeYieldAnnual * LP_SHARE
- *
- * If TVL is zero or hook fees are zero, the projection is suppressed and the
- * card invites the user to model it explicitly at /value.
+ * What we DO show: live TVL, bonus pool, program age, and a CTA into /value
+ * where the full per-currency model lives.
  */
 
 import Link from 'next/link';
 import { useMemo } from 'react';
 import { useReadContract } from 'wagmi';
-import { lensAbi, hookAbi, bootstrapAbi } from '@/lib/abis';
+import { lensAbi, bootstrapAbi } from '@/lib/abis';
 import type { Deployment } from '@/lib/deployments';
 import type { Address } from 'viem';
 
@@ -33,8 +29,6 @@ interface Props {
   chainId: number;
 }
 
-const DEPOSIT_USD = 1_000;
-const LP_SHARE = 0.8;
 const SECONDS_PER_DAY = 86_400;
 
 function fmtUsd(n: number, frac = 0): string {
@@ -50,7 +44,6 @@ function fmtUsd(n: number, frac = 0): string {
 export function ValuePreview({ deployment, chainId }: Props) {
   const vault = deployment.vault as Address | undefined;
   const lens = deployment.lens as Address | undefined;
-  const hook = deployment.hook as Address | undefined;
   const bootstrap = deployment.bootstrap as Address | undefined;
 
   const { data: stats } = useReadContract({
@@ -60,14 +53,6 @@ export function ValuePreview({ deployment, chainId }: Props) {
     args: vault ? [vault] : undefined,
     chainId,
     query: { enabled: Boolean(vault && lens), refetchInterval: 30_000 },
-  });
-
-  const { data: feesRouted } = useReadContract({
-    address: hook,
-    abi: hookAbi,
-    functionName: 'totalFeesRouted',
-    chainId,
-    query: { enabled: Boolean(hook), refetchInterval: 30_000 },
   });
 
   const { data: epoch0 } = useReadContract({
@@ -87,115 +72,70 @@ export function ValuePreview({ deployment, chainId }: Props) {
     query: { enabled: Boolean(bootstrap), staleTime: 600_000 },
   });
 
-  const projection = useMemo(() => {
+  const facts = useMemo(() => {
     if (!stats || !Array.isArray(stats)) return undefined;
     const tvl = stats[0] as bigint;
-    const fees = (feesRouted as bigint | undefined) ?? 0n;
     const dec = BigInt(10) ** BigInt(deployment.assetDecimals);
     const tvlNum = Number(tvl) / Number(dec);
-    const feesNum = Number(fees) / Number(dec);
-    if (tvlNum <= 0 || feesNum <= 0) return undefined;
 
-    const feeYieldLifetime = feesNum / tvlNum;
+    const bonusPool =
+      epoch0 && Array.isArray(epoch0) ? (epoch0[0] as bigint) : 0n;
+    const bonusPoolNum = Number(bonusPool) / Number(dec);
 
-    // Days live: use programStart when available, else clamp to 1 day.
     const startSec = programStart ? Number(programStart) : 0;
     const nowSec = Math.floor(Date.now() / 1000);
     const daysLive =
       startSec > 0 && nowSec > startSec
-        ? Math.max(1, (nowSec - startSec) / SECONDS_PER_DAY)
-        : undefined;
-    const feeYieldAnnual =
-      daysLive !== undefined ? feeYieldLifetime * (365 / daysLive) : undefined;
-
-    const userYearOnFees =
-      feeYieldAnnual !== undefined
-        ? DEPOSIT_USD * feeYieldAnnual * LP_SHARE
+        ? (nowSec - startSec) / SECONDS_PER_DAY
         : undefined;
 
-    const bonusPool = epoch0 && Array.isArray(epoch0) ? (epoch0[0] as bigint) : 0n;
-    const bonusPoolNum = Number(bonusPool) / Number(dec);
-
-    return {
-      feeYieldLifetime,
-      feeYieldAnnual,
-      userYearOnFees,
-      tvl: tvlNum,
-      bonusPool: bonusPoolNum,
-      daysLive,
-    };
-  }, [stats, feesRouted, epoch0, programStart, deployment.assetDecimals]);
+    return { tvl: tvlNum, bonusPool: bonusPoolNum, daysLive };
+  }, [stats, epoch0, programStart, deployment.assetDecimals]);
 
   return (
     <section id="value-preview" className="mx-auto max-w-6xl px-4 py-12">
       <div className="card border-iris-500/30 bg-gradient-to-br from-iris-500/5 to-accent-500/5 p-6 md:p-8">
         <div className="flex flex-col gap-6 md:flex-row md:items-center md:justify-between">
           <div className="max-w-xl">
-            <div className="external-badge mb-3">If you deposit $1,000 today</div>
+            <div className="external-badge mb-3">Model your real return</div>
             <h2 className="text-2xl font-semibold tracking-tight md:text-3xl">
-              {projection?.userYearOnFees !== undefined ? (
-                <>
-                  Projected fee yield ≈{' '}
-                  <span className="gradient-text">
-                    {fmtUsd(projection.userYearOnFees, 2)}
-                  </span>{' '}
-                  <span className="text-base font-normal text-zinc-400">
-                    / year (annualized from on-chain rate)
-                  </span>
-                </>
-              ) : (
-                <>
-                  Model your real return on{' '}
-                  <span className="gradient-text">live pool data</span>.
-                </>
-              )}
+              See exactly what a deposit earns on{' '}
+              <span className="gradient-text">live pool data</span>.
             </h2>
             <p className="mt-3 text-sm text-zinc-400">
-              {projection ? (
+              {facts ? (
                 <>
-                  Lifetime hook-fee yield to date:{' '}
+                  Live TVL:{' '}
                   <span className="font-mono text-zinc-200">
-                    {(projection.feeYieldLifetime * 100).toFixed(3)}%
-                  </span>{' '}
-                  of{' '}
+                    {fmtUsd(facts.tvl, 2)}
+                  </span>
+                  . Bonus pool:{' '}
                   <span className="font-mono text-zinc-200">
-                    {fmtUsd(projection.tvl, 0)}
-                  </span>{' '}
-                  TVL
-                  {projection.daysLive !== undefined ? (
+                    {fmtUsd(facts.bonusPool, 0)} USDC
+                  </span>
+                  {facts.daysLive !== undefined && (
                     <>
-                      , earned over{' '}
+                      . Program age:{' '}
                       <span className="font-mono text-zinc-200">
-                        {projection.daysLive < 1
+                        {facts.daysLive < 1
                           ? '<1'
-                          : projection.daysLive.toFixed(1)}
-                      </span>{' '}
-                      days{' '}
-                      {projection.feeYieldAnnual !== undefined && (
-                        <>
-                          (≈
-                          <span className="font-mono text-zinc-200">
-                            {(projection.feeYieldAnnual * 100).toFixed(2)}%
-                          </span>{' '}
-                          annualized)
-                        </>
-                      )}
+                          : facts.daysLive.toFixed(1)}{' '}
+                        days
+                      </span>
                     </>
-                  ) : null}
-                  . After 80% LP donation. Plus a slice of the{' '}
-                  <span className="font-mono text-zinc-200">
-                    {fmtUsd(projection.bonusPool, 0)}
-                  </span>{' '}
-                  USDC bonus pool while eligible.{' '}
+                  )}
+                  .{' '}
                   <span className="text-zinc-500">
-                    Past activity doesn&apos;t forecast future swap volume.
+                    Pool is in bootstrap. Open the calculator to project fees
+                    per swap currency from your own assumptions instead of
+                    inferring from a sub-$1k TVL window.
                   </span>
                 </>
               ) : (
                 <>
                   Project your share of hook fees and the early-depositor bonus
-                  using the live pool numbers — TVL, share price, fee
-                  distribution split, and bonus pool. No assumptions baked in.
+                  using live pool numbers — TVL, share price, fee distribution
+                  split, bonus pool. Every input is on-chain and editable.
                 </>
               )}
             </p>
