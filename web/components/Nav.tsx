@@ -36,7 +36,7 @@ export function Nav() {
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-accent-500 to-iris-500 text-white font-black shadow-glow">
             P
           </div>
-          <span className="font-semibold tracking-tight">The&nbsp;Pool</span>
+          <span className="font-semibold tracking-tight">The-Pool-Adaptive-Reserve-Hook</span>
           <span className="chip ml-2 hidden sm:inline-flex">Uniswap v4 hook</span>
         </Link>
         <nav className="hidden items-center gap-6 text-sm text-zinc-300 md:flex">
