@@ -110,6 +110,11 @@ export function VaultCard({ deployment, chainId }: { deployment: Deployment; cha
   // default at their own risk.
   const useZap = isInRange && !forcePlain && Boolean(swapInfra);
 
+  // Withdraw-side mirror. The redeem-zap path doesn't need an off-chain V3
+  // quote — the contract uses its own swap adapter and we hand the unwound
+  // WETH leg to it directly — so we only gate on IN_RANGE + override.
+  const useRedeemZap = isInRange && !forcePlain;
+
   const parsed = useMemo(() => {
     if (!amount) return 0n;
     try {
@@ -284,13 +289,46 @@ export function VaultCard({ deployment, chainId }: { deployment: Deployment; cha
         });
       }
     } else {
-      writeContract({
-        address: vault,
-        abi: vaultAbi,
-        functionName: 'redeem',
-        args: [parsed, address, address],
-        chainId,
-      });
+      // Withdraw branch.
+      //
+      // When the LP position is IN_RANGE, the proportional unwind returns
+      // BOTH USDC and WETH from the v4 position. Plain redeem then checks
+      // `IERC20(asset()).balanceOf(this) >= assets` and reverts with
+      // InsufficientAssetUseZap — the unwound USDC alone never covers the
+      // user's redeem on a balanced range. Route through redeemWithZap so
+      // the contract zaps the unwound WETH leg into USDC before paying.
+      //
+      // - otherToSwap = maxUint256: the contract caps to vault's actual
+      //   WETH balance (`amountToSwap = min(otherBalance, otherToSwap)`),
+      //   so this means "use whatever WETH the unwind produced." Safe on
+      //   small TVL; for larger TVL we'd want a proportional cap derived
+      //   from the position's WETH side.
+      // - minAssetOut = 0: per-swap floor. The contract's final solvency
+      //   check `balanceOf(this) >= assets` is the real safety gate, and
+      //   `removeLiquiditySlippageBps` already bounds the unwind side.
+      //   Tighten later with a v4Quoter quoteExactOutputSingle pass.
+      // - deadline = now + 5 min.
+      //
+      // `forcePlain` opts the user back to plain redeem at their own risk
+      // (will revert when in-range; useful only for OUT_OF_RANGE drains).
+      if (useRedeemZap) {
+        const deadline = BigInt(Math.floor(Date.now() / 1000) + ZAP_DEADLINE_SECONDS);
+        writeContract({
+          address: vault,
+          abi: vaultAbi,
+          functionName: 'redeemWithZap',
+          args: [parsed, address, address, maxUint256, 0n, deadline],
+          chainId,
+        });
+      } else {
+        writeContract({
+          address: vault,
+          abi: vaultAbi,
+          functionName: 'redeem',
+          args: [parsed, address, address],
+          chainId,
+        });
+      }
     }
   };
 
@@ -513,6 +551,33 @@ export function VaultCard({ deployment, chainId }: { deployment: Deployment; cha
               {exceedsConservativeWithdraw && (
                 <div className="text-amber-300">
                   Use MAX to leave a 5% execution buffer.
+                </div>
+              )}
+              <div className="border-t border-white/5 pt-2 text-zinc-500">
+                Path:{' '}
+                <span className="font-mono text-zinc-300">
+                  {useRedeemZap ? 'redeemWithZap' : 'redeem'}
+                </span>
+                {useRedeemZap && (
+                  <>
+                    {' · '}
+                    unwinds proportional v4 LP, zaps the WETH leg to{' '}
+                    {deployment.assetSymbol} via SwapRouter02 adapter, pays{' '}
+                    {deployment.assetSymbol}.
+                  </>
+                )}
+              </div>
+              {isInRange && (
+                <div className="border-t border-white/5 pt-2">
+                  <label className="flex cursor-pointer items-center gap-2 text-zinc-400">
+                    <input
+                      type="checkbox"
+                      checked={forcePlain}
+                      onChange={(e) => setForcePlain(e.target.checked)}
+                      className="accent-accent-500"
+                    />
+                    <span>Plain redeem (advanced — reverts when in-range)</span>
+                  </label>
                 </div>
               )}
             </div>
