@@ -57,6 +57,16 @@ const ROLLING_WINDOW_DAYS = 7;
 const SNAPSHOT_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const MAX_SNAPSHOTS = 30 * 24; // 30 days at hourly cadence
 
+// TVL noise floor (USDC).
+//
+// Below this TVL, share-price drift is dominated by mark-to-market on the
+// concentrated-liquidity position (a few cents of WETH revaluing the LP)
+// rather than realised hook fees, and cannot be read as steady-state
+// performance — the percentage is mechanically real but statistically
+// meaningless. Threshold is conservative; tighten later with empirical
+// distribution from `script/StressTest.s.sol`.
+const TVL_NOISE_FLOOR_USDC = 10_000;
+
 interface Snapshot {
   ts: number; // unix seconds
   sp: string; // share price as decimal string (1e18 fixed)
@@ -148,6 +158,18 @@ export function YieldVsBaseline({ deployment, chainId }: Props) {
     query: { enabled: Boolean(vault) && oneShareWhole !== undefined, refetchInterval: 30_000 },
   });
 
+  // Total assets — needed for TVL disclosure. Below the noise-floor
+  // threshold, percentage drift is dominated by mark-to-market on the LP
+  // position, not realised LP fees, and should not be read as steady-state
+  // performance regardless of how many days have elapsed.
+  const { data: totalAssetsRaw } = useReadContract({
+    address: vault,
+    abi: vaultAbi,
+    functionName: 'totalAssets',
+    chainId,
+    query: { enabled: Boolean(vault), refetchInterval: 30_000 },
+  });
+
   // v3 baseline current state — used only to confirm we can read it.
   const { data: v3State } = useReadContracts({
     allowFailure: true,
@@ -210,6 +232,15 @@ export function YieldVsBaseline({ deployment, chainId }: Props) {
 
   const ready = daysSinceLaunch !== undefined && daysSinceLaunch >= ROLLING_WINDOW_DAYS;
 
+  // TVL in whole USDC, plus noise-floor verdict.
+  const tvlUsdc = useMemo(() => {
+    if (totalAssetsRaw === undefined) return undefined;
+    return Number(totalAssetsRaw as bigint) / Number(oneAsset);
+  }, [totalAssetsRaw, oneAsset]);
+
+  const belowNoiseFloor =
+    tvlUsdc !== undefined && tvlUsdc < TVL_NOISE_FLOOR_USDC;
+
   return (
     <section
       id="yield-vs-baseline"
@@ -267,10 +298,58 @@ export function YieldVsBaseline({ deployment, chainId }: Props) {
               . Share price advances at flush blocks; this is realized only,
               excluding latent v4 fee growth.
             </div>
+            <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+              <span className="text-zinc-500">TVL:</span>
+              <span className="font-mono text-zinc-200">
+                {tvlUsdc !== undefined
+                  ? `$${tvlUsdc.toLocaleString(undefined, {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}`
+                  : '—'}
+              </span>
+              <span className="text-zinc-600">·</span>
+              <span className="text-zinc-500">noise floor:</span>
+              <span className="font-mono text-zinc-200">
+                ${TVL_NOISE_FLOOR_USDC.toLocaleString()}
+              </span>
+            </div>
+            {belowNoiseFloor && (
+              <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/[0.06] p-3 text-xs text-amber-200">
+                <div className="font-semibold">
+                  Below noise floor — do not extrapolate.
+                </div>
+                <div className="mt-1 text-amber-200/80">
+                  At TVL &lt; ${TVL_NOISE_FLOOR_USDC.toLocaleString()}, this
+                  percentage is dominated by mark-to-market revaluation of the
+                  concentrated-liquidity position (a few cents of WETH price
+                  movement) rather than realized hook fees. The number is
+                  mechanically real — every share holder can{' '}
+                  <code className="rounded bg-white/5 px-1">redeem()</code> at
+                  the current ratio — but it is not a steady-state yield
+                  signal and must not be annualized. Bootstrap rewards
+                  (
+                  <a
+                    className="text-amber-200 underline-offset-2 hover:underline"
+                    href="https://github.com/emilianosolazzi/The-Pool-Adaptive-Reserve-Hook/blob/main/src/BootstrapRewards.sol"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    BootstrapRewards
+                  </a>
+                  ) pay claimers in USDC directly and{' '}
+                  <span className="font-semibold">
+                    cannot move share price
+                  </span>{' '}
+                  by SPEC §1, so this drift is purely vault NAV.
+                </div>
+              </div>
+            )}
             <div className="mt-3 text-xs text-zinc-500">
               Snapshots stored:{' '}
               <span className="font-mono text-zinc-300">{snapshots.length}</span>
-              {' · '}cadence: 1/hour client-side
+              {' · '}cadence: 1/hour, in your browser only (localStorage; not
+              shared, not a server backfill)
             </div>
           </div>
 
