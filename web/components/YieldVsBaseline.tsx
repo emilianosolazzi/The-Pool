@@ -43,7 +43,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useReadContract, useReadContracts } from 'wagmi';
-import { parseUnits, type Address } from 'viem';
+import { type Address } from 'viem';
 import { vaultAbi } from '@/lib/abis';
 import type { Deployment } from '@/lib/deployments';
 
@@ -116,16 +116,36 @@ export function YieldVsBaseline({ deployment, chainId }: Props) {
   const vault = deployment.vault as Address | undefined;
   const v3Pool = deployment.v3BaselinePool;
   const launchedAt = deployment.launchedAt ?? 0;
-  const oneShare = useMemo(() => parseUnits('1', 18), []);
+
+  // Vault share decimals — needed because shareDec ≠ assetDec when the
+  // ERC-4626 implementation uses a non-zero `_decimalsOffset()`. For
+  // LiquidityVaultV2, offset = 6 and asset (USDC) = 6, so shareDec = 12.
+  // Passing a hard-coded 1e18 to convertToAssets misreads share price by
+  // 10^(18 - shareDec) and yields nonsense percentages.
+  const { data: shareDecRaw } = useReadContract({
+    address: vault,
+    abi: vaultAbi,
+    functionName: 'decimals',
+    chainId,
+    query: { enabled: Boolean(vault) },
+  });
+  const shareDec = (shareDecRaw as number | undefined) ?? undefined;
+
+  const oneShareWhole = useMemo(
+    () => (shareDec === undefined ? undefined : 10n ** BigInt(shareDec)),
+    [shareDec],
+  );
 
   // Current vault share price, scaled to asset decimals.
+  // We query convertToAssets(1 whole share) so the result, divided by
+  // 10^assetDec, is the unit-less assets-per-share ratio.
   const { data: spAssets } = useReadContract({
     address: vault,
     abi: vaultAbi,
     functionName: 'convertToAssets',
-    args: [oneShare],
+    args: oneShareWhole !== undefined ? [oneShareWhole] : undefined,
     chainId,
-    query: { enabled: Boolean(vault), refetchInterval: 30_000 },
+    query: { enabled: Boolean(vault) && oneShareWhole !== undefined, refetchInterval: 30_000 },
   });
 
   // v3 baseline current state — used only to confirm we can read it.
@@ -240,8 +260,11 @@ export function YieldVsBaseline({ deployment, chainId }: Props) {
                 : '—'}
             </div>
             <div className="mt-2 text-xs text-zinc-500">
-              From <code className="rounded bg-white/5 px-1">convertToAssets(1e18)</code>.
-              Share price advances at flush blocks; this is realized only,
+              From{' '}
+              <code className="rounded bg-white/5 px-1">
+                convertToAssets(10^shareDec) / 10^assetDec − 1
+              </code>
+              . Share price advances at flush blocks; this is realized only,
               excluding latent v4 fee growth.
             </div>
             <div className="mt-3 text-xs text-zinc-500">
@@ -311,11 +334,25 @@ export function YieldVsBaseline({ deployment, chainId }: Props) {
             <li>
               <span className="text-white">Vault realized yield</span> ={' '}
               <code className="rounded bg-white/5 px-1 font-mono">
-                vault.convertToAssets(1e18) / 1e{deployment.assetDecimals} − 1
+                vault.convertToAssets(10^shareDec) / 10^assetDec − 1
               </code>
-              . First deposit mints 1:1 by ERC-4626 convention, so this is the
-              cumulative realized return. Excludes uncollected v4 fees by
-              design — see{' '}
+              {' '}where{' '}
+              <code className="rounded bg-white/5 px-1 font-mono">shareDec</code>{' '}
+              ={' '}
+              <code className="rounded bg-white/5 px-1 font-mono">
+                assetDec + _decimalsOffset()
+              </code>
+              {' '}(currently{' '}
+              <span className="font-mono text-zinc-200">
+                {shareDec ?? '—'}
+              </span>
+              {' '}for shares,{' '}
+              <span className="font-mono text-zinc-200">
+                {deployment.assetDecimals}
+              </span>
+              {' '}for assets). First deposit mints at parity by ERC-4626
+              convention, so this ratio − 1 is the cumulative realized return.
+              Excludes uncollected v4 fees by design — see{' '}
               <a
                 className="text-zinc-200 underline-offset-2 hover:underline"
                 href="https://github.com/emilianosolazzi/The-Pool-Adaptive-Reserve-Hook/blob/main/docs/SPEC.md#22-equation-i"
